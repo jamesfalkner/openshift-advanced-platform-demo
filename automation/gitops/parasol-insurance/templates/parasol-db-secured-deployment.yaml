@@ -52,9 +52,9 @@ spec:
             {{- toYaml $.Values.database.resources | nindent 12 }}
           livenessProbe:
             timeoutSeconds: 5
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 5
+            failureThreshold: 6
             tcpSocket:
               port: 5432
           readinessProbe:
