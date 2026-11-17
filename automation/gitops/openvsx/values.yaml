@@ -37,6 +37,7 @@ build:
     uri: "https://github.com/rhpds/openshift-advanced-platform-demo"
     ref: "main"
     contextDir: automation/gitops/openvsx/open-vsx-server
+    extensionUploaderContextDir: automation/gitops/openvsx/extension-uploader
 
 extensionUpload:
   enabled: true

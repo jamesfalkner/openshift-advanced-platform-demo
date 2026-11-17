@@ -13,7 +13,7 @@ spec:
     git:
       uri: {{ .Values.build.git.uri }}
       ref: {{ .Values.build.git.ref }}
-    contextDir: openvsx/extension-uploader
+    contextDir: {{ .Values.build.git.extensionUploaderContextDir | default "automation/gitops/openvsx/extension-uploader" }}
   strategy:
     type: Docker
     dockerStrategy:
