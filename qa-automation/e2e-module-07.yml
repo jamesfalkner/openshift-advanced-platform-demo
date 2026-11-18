@@ -29,16 +29,19 @@
 
   vars:
     _api_url: "{{ (ocp_api_url | default('')) or (openshift_api_url | default('')) or (openshift_api_server_url | default('')) }}"
-    # Konflux logic: in the Showroom runner no admin password is passed, so we
-    # authenticate with the runtime-automation SA token (which provisioning binds
-    # to cluster-admin). Only when ocp_admin_password is supplied (local CLI) do
-    # we fall back to an oc login.
-    _use_sa_token: "{{ ocp_admin_password is not defined }}"
-    showroom_namespace: "{{ lookup('file', '/var/run/secrets/kubernetes.io/serviceaccount/namespace', errors='ignore') | default('showroom', true) }}"
-    showroom_sa_secret: runtime-automation-token
+    # The e2e MIMICS A REAL ATTENDEE: it authenticates as a demo persona (the
+    # platform-engineer user `pe1` by default), NOT cluster-admin. pe1 has the
+    # same console access a real user has (pipelines, Argo apps, routes, pods) plus
+    # the platform-engineer actions used in the demo (e.g. the DevSpaces sample
+    # ConfigMap). Override with -e qa_persona=dev1 if a module needs the developer.
+    qa_persona: pe1
+    qa_persona_password: "{{ common_password | default('openshift') }}"
     common_password: openshift
     qa_run_mutating: false
-    gitlab_root_user: root
+    # Personas (mimic the demo): the developer (dev2) overlays the LLM code and
+    # opens the merge request; the platform engineer (pe1) approves/merges it.
+    gitlab_dev_user: dev2
+    gitlab_pe_user: pe1
     gitlab_project_ref: "parasol%2Fparasol-insurance"
     llm_branch: llm-classification
     ns_dev: parasol-insurance-dev
@@ -58,43 +61,24 @@
           - _api_url | length > 0
         fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
 
-    - name: Get runtime-automation SA token (runner mode)
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Secret
-        namespace: "{{ showroom_namespace }}"
-        name: "{{ showroom_sa_secret }}"
-      register: _ra_secret
-      when: _use_sa_token | bool
-
-    - name: Set k8s auth (runner mode)
-      ansible.builtin.set_fact:
-        _k8s_host: "{{ _api_url }}"
-        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
-        _k8s_validate_certs: false
-      when: _use_sa_token | bool
-      no_log: true
-
-    - name: Login to OpenShift (CLI mode)
+    - name: Log in to OpenShift as the demo persona ({{ qa_persona }})
       ansible.builtin.command:
-        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+        cmd: "oc login {{ _api_url }} --username {{ qa_persona }} --password {{ qa_persona_password }} --insecure-skip-tls-verify"
       changed_when: false
       no_log: true
-      when: not (_use_sa_token | bool)
 
-    - name: Capture admin API token (CLI mode)
+    - name: Capture persona API token
       ansible.builtin.command: oc whoami -t
       register: _oc_token
       changed_when: false
       no_log: true
-      when: not (_use_sa_token | bool)
 
-    - name: Set k8s auth (CLI mode)
+    - name: Set k8s auth to the persona identity
       ansible.builtin.set_fact:
         _k8s_host: "{{ _api_url }}"
         _k8s_api_key: "{{ _oc_token.stdout }}"
         _k8s_validate_certs: false
-      when: not (_use_sa_token | bool)
+      no_log: true
 
     # --- Prereq: LLM credentials ExternalSecret Ready --------------------
     - name: Find LLM credentials ExternalSecret
@@ -153,14 +137,14 @@
         _gitlab_url: "https://{{ r_gitlab_route.resources[0].spec.host }}"
       when: r_gitlab_route.resources | default([]) | length > 0
 
-    - name: Mint GitLab API token
+    - name: Mint GitLab API token as the developer ({{ gitlab_dev_user }})
       ansible.builtin.uri:
         url: "{{ _gitlab_url }}/oauth/token"
         method: POST
         body_format: json
         body:
           grant_type: password
-          username: "{{ gitlab_root_user }}"
+          username: "{{ gitlab_dev_user }}"
           password: "{{ common_password }}"
         validate_certs: false
         status_code: [200]
@@ -252,12 +236,28 @@
             e2e_failures: "{{ e2e_failures + ['Could not open an MR from ' + llm_branch + ' to main'] }}"
           when: r_mr_list.json | default([]) | length == 0
 
-        - name: Merge the MR
+        # The platform engineer (pe1) approves/merges the MR — mint a pe1 token.
+        - name: Mint GitLab API token as the platform engineer ({{ gitlab_pe_user }})
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/oauth/token"
+            method: POST
+            body_format: json
+            body:
+              grant_type: password
+              username: "{{ gitlab_pe_user }}"
+              password: "{{ common_password }}"
+            validate_certs: false
+            status_code: [200]
+          register: r_pe_oauth
+          no_log: true
+          when: r_mr_list.json | default([]) | length > 0
+
+        - name: Merge the MR as the platform engineer
           ansible.builtin.uri:
             url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ r_mr_list.json[0].iid }}/merge"
             method: PUT
             headers:
-              Authorization: "Bearer {{ _gitlab_token }}"
+              Authorization: "Bearer {{ r_pe_oauth.json.access_token }}"
             validate_certs: false
             status_code: [200, 405, 406]
           register: r_merge
