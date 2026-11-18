@@ -55,8 +55,15 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 10
             failureThreshold: 6
-            tcpSocket:
-              port: 5432
+            # Use an exec probe (runs inside the container) so it bypasses the
+            # Istio ambient mesh. A tcpSocket probe to 5432 is captured by ztunnel
+            # once ambient redirection programs the pod and fails the HBONE/mTLS
+            # handshake, causing kubelet to SIGKILL the DB (CrashLoopBackOff).
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -h 127.0.0.1 -p 5432
           readinessProbe:
             timeoutSeconds: 1
             initialDelaySeconds: 5
