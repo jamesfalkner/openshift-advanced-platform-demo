@@ -87,6 +87,14 @@
       - openshift-gitops
       - rhdh-gitops
 
+    # Argo apps that are built/deployed BY THE USER during the demo (Section 2 —
+    # the secure supply chain). Their container images do not exist until the
+    # student runs the secure pipeline (Module 5) and the PE promotes them, so on
+    # a freshly provisioned instance they are ImagePullBackOff / Progressing BY
+    # DESIGN. They must NOT fail a readiness healthcheck. Matched as substrings.
+    argocd_demo_built_app_patterns:
+      - secured          # parasol-insurance-secured-{build,dev,prod}
+
     healthcheck_failures: []
 
   tasks:
@@ -186,9 +194,34 @@
 
     - name: Flatten Argo CD Application list
       ansible.builtin.set_fact:
-        _all_argo_apps: "{{ r_argo_apps.results | map(attribute='resources') | sum(start=[]) }}"
+        _all_argo_apps_raw: "{{ r_argo_apps.results | map(attribute='resources') | sum(start=[]) }}"
 
-    - name: Record Argo apps that are not Healthy
+    # Exclude the user-built (demo) apps so we only gate on what provisioning is
+    # responsible for making Healthy. Excluded apps are reported for visibility.
+    - name: Separate demo-built apps from gated apps
+      ansible.builtin.set_fact:
+        _all_argo_apps: >-
+          {{ _all_argo_apps_raw
+             | rejectattr('metadata.name', 'search', argocd_demo_built_app_patterns | join('|'))
+             | list }}
+        _excluded_argo_apps: >-
+          {{ _all_argo_apps_raw
+             | selectattr('metadata.name', 'search', argocd_demo_built_app_patterns | join('|'))
+             | list }}
+
+    - name: Note demo-built apps excluded from health gating
+      ansible.builtin.debug:
+        msg: >-
+          Excluded {{ _excluded_argo_apps | length }} user-built app(s) from health
+          gating (built during the demo's secure supply chain section):
+          {{ _excluded_argo_apps | map(attribute='metadata.name') | list }}
+      when: _excluded_argo_apps | length > 0
+
+    # Hard-fail only on Degraded/Missing (real breakage). Progressing/Unknown is
+    # treated as a non-fatal warning: the app-of-apps parent sits in Progressing
+    # on a fresh instance because its secure-supply-chain children are not built
+    # until the student runs the demo.
+    - name: Record Argo apps that are Degraded/Missing (hard fail)
       ansible.builtin.set_fact:
         healthcheck_failures: >-
           {{ healthcheck_failures +
@@ -197,7 +230,17 @@
       loop: "{{ _all_argo_apps }}"
       loop_control:
         label: "{{ item.metadata.name }}"
-      when: (item.status.health.status | default('Unknown')) != 'Healthy'
+      when: (item.status.health.status | default('Unknown')) in ['Degraded', 'Missing']
+
+    - name: Warn on Argo apps still Progressing/Unknown
+      ansible.builtin.debug:
+        msg: >-
+          Argo app {{ item.metadata.namespace }}/{{ item.metadata.name }}
+          health={{ item.status.health.status | default('Unknown') }} (not gating)
+      loop: "{{ _all_argo_apps }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: (item.status.health.status | default('Unknown')) not in ['Healthy', 'Degraded', 'Missing']
 
     - name: Record Argo apps that are not Synced
       ansible.builtin.set_fact:
