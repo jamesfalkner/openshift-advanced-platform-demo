@@ -33,9 +33,11 @@
 
   vars:
     _api_url: "{{ (ocp_api_url | default('')) or (openshift_api_url | default('')) or (openshift_api_server_url | default('')) }}"
-    _admin_user: "{{ (openshift_cluster_admin_username | default('')) or 'admin' }}"
-    _admin_password: "{{ (ocp_admin_password | default('')) or (openshift_cluster_admin_password | default('')) }}"
-    _use_sa_token: "{{ (_admin_password | length) == 0 }}"
+    # Konflux logic: in the Showroom runner no admin password is passed, so we
+    # authenticate with the runtime-automation SA token (which provisioning binds
+    # to cluster-admin). Only when ocp_admin_password is supplied (local CLI) do
+    # we fall back to an oc login.
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
     showroom_namespace: "{{ lookup('file', '/var/run/secrets/kubernetes.io/serviceaccount/namespace', errors='ignore') | default('showroom', true) }}"
     showroom_sa_secret: runtime-automation-token
     common_password: openshift
@@ -79,16 +81,23 @@
 
     - name: Login to OpenShift (CLI mode)
       ansible.builtin.command:
-        cmd: "oc login {{ _api_url }} --username {{ _admin_user }} --password {{ _admin_password }} --insecure-skip-tls-verify"
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Capture admin API token (CLI mode)
+      ansible.builtin.command: oc whoami -t
+      register: _oc_token
       changed_when: false
       no_log: true
       when: not (_use_sa_token | bool)
 
     - name: Set k8s auth (CLI mode)
       ansible.builtin.set_fact:
-        _k8s_host: ""
-        _k8s_api_key: ""
-        _k8s_validate_certs: true
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _oc_token.stdout }}"
+        _k8s_validate_certs: false
       when: not (_use_sa_token | bool)
 
     # --- GitLab API token (OAuth password grant) -------------------------
