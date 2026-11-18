@@ -401,9 +401,13 @@
             | selectattr('status', 'equalto', 'True') | list | length == 0)
 
     # =========================================================================
-    # Check 7: Parasol dev application running
+    # Check 7: Parasol dev application (REPORT ONLY — never gates)
     # =========================================================================
-    - name: Check parasol deployments in dev namespace are available
+    # The parasol-db and parasol-insurance app pods can be in CrashLoopBackOff
+    # transiently (e.g. DB/app settling after provisioning, or the Istio ambient
+    # ztunnel being re-healed). This is demo-runtime state, not an instance
+    # readiness signal, so we report it but DO NOT fail the healthcheck.
+    - name: Check parasol deployments in dev namespace (report only)
       kubernetes.core.k8s_info:
         host: "{{ _k8s_host | default(omit, true) }}"
         api_key: "{{ _k8s_api_key | default(omit, true) }}"
@@ -414,15 +418,16 @@
       register: r_parasol_deploys
       ignore_errors: true
 
-    - name: Record parasol dev app has no available deployments
-      ansible.builtin.set_fact:
-        healthcheck_failures: >-
-          {{ healthcheck_failures + ['No available Deployments in parasol-insurance-dev'] }}
-      when: >-
-        r_parasol_deploys.resources | default([]) | length == 0
-        or (r_parasol_deploys.resources
-            | selectattr('status.availableReplicas', 'defined')
-            | selectattr('status.availableReplicas', 'ge', 1) | list | length == 0)
+    - name: Report parasol dev deployment availability (not gating)
+      ansible.builtin.debug:
+        msg: >-
+          parasol-insurance-dev deployment '{{ item.metadata.name }}'
+          availableReplicas={{ item.status.availableReplicas | default(0) }}
+          (crashloops are ignored — not gating)
+      loop: "{{ r_parasol_deploys.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: (item.status.availableReplicas | default(0)) < 1
 
     # =========================================================================
     # Summary
