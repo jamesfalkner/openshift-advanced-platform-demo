@@ -25,3 +25,9 @@ istioCni:
 
 ztunnel:
   namespace: ztunnel
+
+# Required for Istio ambient mode on OVN-Kubernetes. Routes kubelet traffic
+# through the host network so ztunnel does not intercept liveness/readiness
+# probes. Set to false on non-OVN clusters (e.g. OpenShiftSDN).
+ovn:
+  routingViaHost: true

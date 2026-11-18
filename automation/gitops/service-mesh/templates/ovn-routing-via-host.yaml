@@ -1,0 +1,21 @@
+# On OVN-Kubernetes, kubelet sends probes through ovn-k8s-mp0 (pod CIDR),
+# which ztunnel captures as pod-to-pod traffic. routingViaHost: true routes
+# this through the host network instead, so probes bypass ztunnel.
+# Without this, any pod with httpGet/tcpSocket probes in an ambient namespace
+# will intermittently fail with "context deadline exceeded" / "i/o timeout".
+# Only applies to OVN-Kubernetes; must be disabled on other CNIs.
+{{- if .Values.ovn.routingViaHost }}
+---
+apiVersion: operator.openshift.io/v1
+kind: Network
+metadata:
+  name: cluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  defaultNetwork:
+    ovnKubernetesConfig:
+      gatewayConfig:
+        routingViaHost: true
+{{- end }}
