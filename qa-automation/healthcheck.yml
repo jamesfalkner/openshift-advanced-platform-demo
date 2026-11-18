@@ -43,8 +43,10 @@
 
   vars:
     # --- Inputs (CLI -e or showroom user_data.yml) ---
-    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
-    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    _api_url: "{{ ocp_api_url | default(openshift_api_url | default(openshift_api_server_url | default(''))) }}"
+    _admin_user: "{{ ocp_admin_user | default(openshift_cluster_admin_username | default('admin')) }}"
+    _admin_password: "{{ ocp_admin_password | default(openshift_cluster_admin_password | default('')) }}"
+    _use_sa_token: "{{ (_admin_password | length) == 0 }}"
     # Showroom runner SA (used only when no admin password is supplied)
     showroom_namespace: "{{ lookup('file', '/var/run/secrets/kubernetes.io/serviceaccount/namespace', errors='ignore') | default('showroom', true) }}"
     showroom_sa_secret: runtime-automation-token
@@ -92,8 +94,7 @@
     - name: Validate required variables
       ansible.builtin.assert:
         that:
-          - ocp_api_url is defined or openshift_api_url is defined
-          - ocp_admin_password is defined or _use_sa_token | bool
+          - _api_url | length > 0
         fail_msg: >-
           Missing required variables.
           CLI: pass ocp_api_url and ocp_admin_password via -e.
