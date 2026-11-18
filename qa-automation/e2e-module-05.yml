@@ -20,9 +20,9 @@
   gather_facts: false
 
   vars:
-    _api_url: "{{ ocp_api_url | default(openshift_api_url | default(openshift_api_server_url | default(''))) }}"
-    _admin_user: "{{ ocp_admin_user | default(openshift_cluster_admin_username | default('admin')) }}"
-    _admin_password: "{{ ocp_admin_password | default(openshift_cluster_admin_password | default('')) }}"
+    _api_url: "{{ (ocp_api_url | default('')) or (openshift_api_url | default('')) or (openshift_api_server_url | default('')) }}"
+    _admin_user: "{{ (openshift_cluster_admin_username | default('')) or 'admin' }}"
+    _admin_password: "{{ (ocp_admin_password | default('')) or (openshift_cluster_admin_password | default('')) }}"
     _use_sa_token: "{{ (_admin_password | length) == 0 }}"
     showroom_namespace: "{{ lookup('file', '/var/run/secrets/kubernetes.io/serviceaccount/namespace', errors='ignore') | default('showroom', true) }}"
     showroom_sa_secret: runtime-automation-token
