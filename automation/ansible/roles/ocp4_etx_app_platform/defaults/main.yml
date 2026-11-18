@@ -202,6 +202,13 @@ ocp4_etx_app_platform_noobaa_operator_channel: stable-4.16
 ocp4_etx_app_platform_noobaa_storage_class: ocs-external-storagecluster-ceph-rbd
 
 # ------------------------------------------------
+# Service Mesh / OVN
+# ------------------------------------------------
+# Required for Istio ambient mode on OVN-Kubernetes.
+# Set to false on non-OVN clusters (e.g. OpenShiftSDN).
+ocp4_etx_app_platform_ovn_routing_via_host: true
+
+# ------------------------------------------------
 # Web Terminal
 # ------------------------------------------------
 ocp4_etx_app_platform_terminal_install: true

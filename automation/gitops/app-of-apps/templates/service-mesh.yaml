@@ -21,6 +21,10 @@ spec:
           source: {{ include "app-of-apps.operatorSource" . }}
         kiali:
           source: {{ include "app-of-apps.operatorSource" . }}
+{{- if hasKey (.Values.serviceMesh) "ovn_routing_via_host" }}
+        ovn:
+          routingViaHost: {{ .Values.serviceMesh.ovn_routing_via_host }}
+{{- end }}
   syncPolicy:
     automated:
       prune: true
