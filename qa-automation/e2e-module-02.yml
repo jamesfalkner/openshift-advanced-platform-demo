@@ -8,12 +8,13 @@
 #     git push  →  Tekton pipeline (build/scan/push)  →  Argo CD sync  →  the
 #     new claims-statistics endpoint is live in the dev environment.
 #
-# Instead of driving DevSpaces + the Source Control view + Roo Code AI, we:
+# This follows the Module 2 narrative EXACTLY (two pushes):
 #   1. Mint a GitLab API token as the developer persona (dev1/common_password).
-#   2. Commit the CLEAN ClaimsStatsResource.java to main via the Commits API
-#      (this is the end state after the demo's "AI fixes the code smells" step —
-#      we assert the deterministic outcome, not the non-deterministic LLM run).
-#   3. Wait for a Tekton PipelineRun in the build namespace to Succeed.
+#   2. PHASE 1 — commit ClaimsStatsResource.java WITH code smells
+#      (System.out.println, empty catch, field injection). Per the instructions
+#      the pipeline MUST FAIL at the Sonarqube quality gate — we assert it fails.
+#   3. PHASE 2 — commit the FIXED code (the demo uses the Roo Code AI; we commit
+#      the known-good result) and assert the pipeline now SUCCEEDS.
 #   4. Wait for the Argo CD parasol-insurance-dev app to be Synced + Healthy.
 #   5. GET /api/claims/stats on the dev route and assert HTTP 200 + JSON.
 #
@@ -136,18 +137,7 @@
       ansible.builtin.set_fact:
         _project_id: "{{ r_project.json.id }}"
 
-    # --- Record pre-push time to correlate the new PipelineRun ------------
-    - name: Record push timestamp
-      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
-      register: r_now
-      changed_when: false
-
-    - name: Set marker time
-      ansible.builtin.set_fact:
-        _push_time: "{{ r_now.stdout }}"
-
-    # --- Determine whether the stats file already exists ------------------
-    - name: Check if stats file exists on main
+    - name: Check if stats file already exists on main
       ansible.builtin.uri:
         url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ stats_file_path | urlencode }}?ref=main"
         method: GET
@@ -157,12 +147,17 @@
         status_code: [200, 404]
       register: r_file_check
 
-    - name: Choose commit action (create vs update)
-      ansible.builtin.set_fact:
-        _commit_action: "{{ 'update' if (r_file_check.status == 200) else 'create' }}"
+    # =====================================================================
+    # PHASE 1 (Module 2 Part 1-2): the developer pushes code WITH code
+    # smells (System.out.println, empty catch, field injection). Per the
+    # instructions, the pipeline MUST FAIL at the Sonarqube quality gate.
+    # =====================================================================
+    - name: Record Phase-1 push timestamp
+      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+      register: r_now1
+      changed_when: false
 
-    # --- Commit the CLEAN endpoint (post-AI-fix end state) ----------------
-    - name: Commit clean ClaimsStatsResource.java to main
+    - name: Commit ClaimsStatsResource.java WITH code smells (as {{ gitlab_user }})
       ansible.builtin.uri:
         url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/commits"
         method: POST
@@ -171,9 +166,150 @@
         body_format: json
         body:
           branch: main
-          commit_message: "qa-e2e: add/refresh claims statistics endpoint"
+          commit_message: "qa-e2e: add claims statistics endpoint"
           actions:
-            - action: "{{ _commit_action }}"
+            - action: "{{ 'update' if (r_file_check.status == 200) else 'create' }}"
+              file_path: "{{ stats_file_path }}"
+              content: |
+                package com.parasol;
+
+                import java.util.HashMap;
+                import java.util.Map;
+
+                import jakarta.inject.Inject;
+                import jakarta.ws.rs.GET;
+                import jakarta.ws.rs.Path;
+                import jakarta.ws.rs.Produces;
+                import jakarta.ws.rs.core.MediaType;
+
+                @Path("/api/claims/stats")
+                @Produces(MediaType.APPLICATION_JSON)
+                public class ClaimsStatsResource {
+
+                    @Inject
+                    ClaimsResource claimsResource;
+
+                    @GET
+                    public Map<String, Object> getStats() {
+                        Map<String, Object> stats = new HashMap<>();
+
+                        System.out.println("Fetching claim statistics");
+
+                        try {
+                            var claims = claimsResource.getAllClaims();
+                            stats.put("total", claims.size());
+
+                            Map<String, Long> byCategory = new HashMap<>();
+                            for (var claim : claims) {
+                                byCategory.merge(claim.getCategory(), 1L, Long::sum);
+                            }
+                            stats.put("by_category", byCategory);
+
+                            Map<String, Long> byStatus = new HashMap<>();
+                            for (var claim : claims) {
+                                byStatus.merge(claim.getStatus(), 1L, Long::sum);
+                            }
+                            stats.put("by_status", byStatus);
+                        } catch (Exception e) {
+                        }
+
+                        return stats;
+                    }
+                }
+        validate_certs: false
+        status_code: [201]
+
+    - name: Wait for the Phase-1 PipelineRun to appear
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns_build }}"
+      register: r_prs1
+      until: >-
+        r_prs1.resources | selectattr('metadata.creationTimestamp', 'ge', r_now1.stdout) | list | length > 0
+      retries: 20
+      delay: 10
+
+    - name: Select the Phase-1 PipelineRun
+      ansible.builtin.set_fact:
+        _pr1_name: >-
+          {{ (r_prs1.resources | selectattr('metadata.creationTimestamp', 'ge', r_now1.stdout)
+              | sort(attribute='metadata.creationTimestamp') | last).metadata.name }}
+
+    - name: Wait for the Phase-1 PipelineRun to COMPLETE (expecting failure)
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns_build }}"
+        name: "{{ _pr1_name }}"
+      register: r_pr1_status
+      until:
+        - r_pr1_status.resources[0].status.completionTime is defined
+      retries: "{{ pipeline_retries }}"
+      delay: "{{ pipeline_delay }}"
+
+    - name: Assert Phase-1 pipeline FAILED (as the instructions require)
+      ansible.builtin.assert:
+        that:
+          - >-
+            r_pr1_status.resources[0].status.conditions
+            | selectattr('type', 'equalto', 'Succeeded')
+            | selectattr('status', 'equalto', 'False') | list | length > 0
+        success_msg: "Phase 1 pipeline failed as expected (code smells caught)."
+        fail_msg: >-
+          Phase 1 pipeline did NOT fail. The instructions require the code-smell
+          push to fail at the Sonarqube quality gate, but it completed successfully.
+
+    - name: Confirm Phase-1 failed at the sonar-scan task (documented gate)
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: TaskRun
+        namespace: "{{ ns_build }}"
+        label_selectors:
+          - "tekton.dev/pipelineRun={{ _pr1_name }}"
+      register: r_pr1_tasks
+
+    - name: Report which task failed in Phase 1
+      ansible.builtin.debug:
+        msg: >-
+          Phase-1 failed task(s):
+          {{ r_pr1_tasks.resources
+             | selectattr('status.conditions', 'defined')
+             | selectattr('status.conditions.0.status', 'equalto', 'False')
+             | map(attribute='metadata.labels')
+             | map(attribute='tekton.dev/pipelineTask') | list }}
+
+    # =====================================================================
+    # PHASE 2 (Module 2 Part 2-3): the developer fixes the code smells
+    # (the demo uses the Roo Code AI; we commit the known-good result) and
+    # pushes again. The pipeline MUST now PASS.
+    # =====================================================================
+    - name: Record Phase-2 push timestamp
+      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+      register: r_now2
+      changed_when: false
+
+    - name: Commit the FIXED ClaimsStatsResource.java (as {{ gitlab_user }})
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/commits"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _gitlab_token }}"
+        body_format: json
+        body:
+          branch: main
+          commit_message: "qa-e2e: fix code smells (proper logging, no empty catch, constructor injection)"
+          actions:
+            - action: update
               file_path: "{{ stats_file_path }}"
               content: |
                 package com.parasol;
@@ -218,10 +354,8 @@
                 }
         validate_certs: false
         status_code: [201]
-      register: r_commit
 
-    # --- Wait for the triggered PipelineRun to succeed -------------------
-    - name: Wait for a PipelineRun created after the push to appear
+    - name: Wait for the Phase-2 PipelineRun to appear
       kubernetes.core.k8s_info:
         host: "{{ _k8s_host | default(omit, true) }}"
         api_key: "{{ _k8s_api_key | default(omit, true) }}"
@@ -229,19 +363,19 @@
         api_version: tekton.dev/v1
         kind: PipelineRun
         namespace: "{{ ns_build }}"
-      register: r_prs
+      register: r_prs2
       until: >-
-        r_prs.resources | selectattr('metadata.creationTimestamp', 'ge', _push_time) | list | length > 0
+        r_prs2.resources | selectattr('metadata.creationTimestamp', 'ge', r_now2.stdout) | list | length > 0
       retries: 20
       delay: 10
 
-    - name: Select latest PipelineRun since the push
+    - name: Select the Phase-2 PipelineRun
       ansible.builtin.set_fact:
         _pr_name: >-
-          {{ (r_prs.resources | selectattr('metadata.creationTimestamp', 'ge', _push_time)
+          {{ (r_prs2.resources | selectattr('metadata.creationTimestamp', 'ge', r_now2.stdout)
               | sort(attribute='metadata.creationTimestamp') | last).metadata.name }}
 
-    - name: Wait for PipelineRun to Succeed
+    - name: Wait for the Phase-2 PipelineRun to SUCCEED
       kubernetes.core.k8s_info:
         host: "{{ _k8s_host | default(omit, true) }}"
         api_key: "{{ _k8s_api_key | default(omit, true) }}"
@@ -313,7 +447,8 @@
     - name: "Module 02 — PASSED"
       ansible.builtin.debug:
         msg: |
-          CI/CD end-to-end verified:
-          - PipelineRun succeeded: {{ _pr_name }}
+          CI/CD end-to-end verified (full Module 2 narrative):
+          - Phase 1 (code smells) pipeline FAILED at the Sonar gate: {{ _pr1_name }}
+          - Phase 2 (fixed) PipelineRun SUCCEEDED: {{ _pr_name }}
           - Argo CD {{ argocd_app_dev }} Synced + Healthy
           - {{ stats_endpoint_path }} live on https://{{ _parasol_host }}
