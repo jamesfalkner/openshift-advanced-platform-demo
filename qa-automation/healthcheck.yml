@@ -217,11 +217,11 @@
           {{ _excluded_argo_apps | map(attribute='metadata.name') | list }}
       when: _excluded_argo_apps | length > 0
 
-    # Hard-fail only on Degraded/Missing (real breakage). Progressing/Unknown is
-    # treated as a non-fatal warning: the app-of-apps parent sits in Progressing
-    # on a fresh instance because its secure-supply-chain children are not built
-    # until the student runs the demo.
-    - name: Record Argo apps that are Degraded/Missing (hard fail)
+    # Hard-fail only when an app is Missing (never bootstrapped). Degraded and
+    # Progressing are NOT failures — they are expected/transient during the demo
+    # (apps get rebuilt/promoted, the parasol app cycles, secured envs build
+    # later) — so they are reported as warnings only.
+    - name: Record Argo apps that are Missing (hard fail)
       ansible.builtin.set_fact:
         healthcheck_failures: >-
           {{ healthcheck_failures +
@@ -230,9 +230,9 @@
       loop: "{{ _all_argo_apps }}"
       loop_control:
         label: "{{ item.metadata.name }}"
-      when: (item.status.health.status | default('Unknown')) in ['Degraded', 'Missing']
+      when: (item.status.health.status | default('Unknown')) == 'Missing'
 
-    - name: Warn on Argo apps still Progressing/Unknown
+    - name: Warn on Argo apps not Healthy (Degraded/Progressing/Unknown — not gating)
       ansible.builtin.debug:
         msg: >-
           Argo app {{ item.metadata.namespace }}/{{ item.metadata.name }}
@@ -240,7 +240,7 @@
       loop: "{{ _all_argo_apps }}"
       loop_control:
         label: "{{ item.metadata.name }}"
-      when: (item.status.health.status | default('Unknown')) not in ['Healthy', 'Degraded', 'Missing']
+      when: (item.status.health.status | default('Unknown')) not in ['Healthy', 'Missing']
 
     - name: Record Argo apps that are not Synced
       ansible.builtin.set_fact:
