@@ -21,8 +21,8 @@
   vars:
     _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
     _use_sa_token: "{{ ocp_admin_password is not defined }}"
-    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
-    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    showroom_namespace: "{{ lookup('file', '/var/run/secrets/kubernetes.io/serviceaccount/namespace', errors='ignore') | default('showroom', true) }}"
+    showroom_sa_secret: runtime-automation-token
     ns_rhdh: rhdh
     rhdh_route_name: backstage-developer-hub
     template_match: "secured development"
