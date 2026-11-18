@@ -19,11 +19,6 @@ spec:
     metadata:
       labels:
         app: parasol-db
-        # Exclude the DB pod from the Istio ambient mesh. Otherwise ztunnel
-        # captures the pod's traffic and the kubelet tcpSocket liveness probe to
-        # 5432 fails the HBONE/mTLS handshake, causing repeated SIGKILL
-        # (CrashLoopBackOff). The DB needs no mesh features.
-        istio.io/dataplane-mode: none
     spec:
       securityContext:
         runAsNonRoot: true
