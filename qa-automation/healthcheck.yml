@@ -87,13 +87,16 @@
       - openshift-gitops
       - rhdh-gitops
 
-    # Argo apps that are built/deployed BY THE USER during the demo (Section 2 —
-    # the secure supply chain). Their container images do not exist until the
-    # student runs the secure pipeline (Module 5) and the PE promotes them, so on
-    # a freshly provisioned instance they are ImagePullBackOff / Progressing BY
-    # DESIGN. They must NOT fail a readiness healthcheck. Matched as substrings.
-    argocd_demo_built_app_patterns:
-      - secured          # parasol-insurance-secured-{build,dev,prod}
+    # Only PLATFORM/INFRASTRUCTURE Argo apps are gated for readiness. Those live
+    # in openshift-gitops (operators, parasol-db, RBAC, DevSpaces, GitLab, RHDH,
+    # etc. bootstrapped from this repo).
+    #
+    # The rhdh-gitops apps (parasol-insurance-{dev,prod,build,secured-*}) are the
+    # Parasol APPLICATION lifecycle, deployed/rebuilt/promoted DURING the demo
+    # from the in-cluster GitLab manifests repos. Their health is demo-runtime
+    # state, not provisioning readiness, so they are reported but NOT gated.
+    argocd_gated_namespaces:
+      - openshift-gitops
 
     healthcheck_failures: []
 
@@ -196,24 +199,24 @@
       ansible.builtin.set_fact:
         _all_argo_apps_raw: "{{ r_argo_apps.results | map(attribute='resources') | sum(start=[]) }}"
 
-    # Exclude the user-built (demo) apps so we only gate on what provisioning is
-    # responsible for making Healthy. Excluded apps are reported for visibility.
-    - name: Separate demo-built apps from gated apps
+    # Gate only platform/infra apps (openshift-gitops). The Parasol application
+    # environment apps (rhdh-gitops) are demo-runtime state and are reported only.
+    - name: Separate platform apps from demo application apps
       ansible.builtin.set_fact:
         _all_argo_apps: >-
           {{ _all_argo_apps_raw
-             | rejectattr('metadata.name', 'search', argocd_demo_built_app_patterns | join('|'))
+             | selectattr('metadata.namespace', 'in', argocd_gated_namespaces)
              | list }}
         _excluded_argo_apps: >-
           {{ _all_argo_apps_raw
-             | selectattr('metadata.name', 'search', argocd_demo_built_app_patterns | join('|'))
+             | rejectattr('metadata.namespace', 'in', argocd_gated_namespaces)
              | list }}
 
-    - name: Note demo-built apps excluded from health gating
+    - name: Note demo application apps excluded from health gating
       ansible.builtin.debug:
         msg: >-
-          Excluded {{ _excluded_argo_apps | length }} user-built app(s) from health
-          gating (built during the demo's secure supply chain section):
+          Excluded {{ _excluded_argo_apps | length }} demo application app(s) from health
+          gating (Parasol app environments built/promoted during the demo):
           {{ _excluded_argo_apps | map(attribute='metadata.name') | list }}
       when: _excluded_argo_apps | length > 0
 
