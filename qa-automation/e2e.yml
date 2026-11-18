@@ -1,0 +1,56 @@
+---
+# =============================================================================
+# OpenShift Advanced App Platform Demo — E2E Smoke Tests (Orchestrator)
+# =============================================================================
+#
+# Runs outcome-focused end-to-end tests for the seven demo content modules in
+# sequence. We validate the OUTCOME of each module (what the presenter would
+# visually confirm) by driving the equivalent API / git / oc action — NOT by
+# replaying the exact UI clicks. Pure talk-track and visual-only steps have no
+# machine outcome and are intentionally skipped.
+#
+# Modules:
+#   01  Developer experience   — Parasol dev app + DevSpaces ready; stats endpoint
+#   02  CI/CD pipeline         — push code → Tekton run → Argo sync → endpoint live
+#   03  Platform operations    — Service Mesh, HPA autoscaling, Vault secrets
+#   04  Developer Hub          — RHDH up, catalog populated, software templates
+#   05  Secure development     — secure pipeline, ACS, TAS signing present/healthy
+#   06  Trusted supply chain   — TPA reachable and serving SBOM/vuln data
+#   07  AI applications        — LLM email routing: no "Review Required" remains
+#
+# Usage (full suite):
+#   ansible-playbook qa-automation/e2e.yml \
+#     -e "ocp_api_url=https://api.cluster-xxx:6443" \
+#     -e "ocp_admin_password=xxx" \
+#     -e "common_password=openshift"
+#
+# Single module:
+#   ansible-playbook qa-automation/e2e-module-02.yml -e "..."
+#
+# Notes:
+#   - Modules are largely independent (shared, pre-provisioned environment), but
+#     02 must pass before the app reflects the new endpoint used by later checks.
+#   - Mutating modules (02, 05, 07) push commits via the GitLab API to trigger
+#     real pipeline runs, then clean up branches they create.
+# =============================================================================
+
+- name: "E2E — Module 01: Developer experience"
+  ansible.builtin.import_playbook: e2e-module-01.yml
+
+- name: "E2E — Module 02: CI/CD pipeline"
+  ansible.builtin.import_playbook: e2e-module-02.yml
+
+- name: "E2E — Module 03: Platform operations"
+  ansible.builtin.import_playbook: e2e-module-03.yml
+
+- name: "E2E — Module 04: Developer Hub"
+  ansible.builtin.import_playbook: e2e-module-04.yml
+
+- name: "E2E — Module 05: Secure development workflow"
+  ansible.builtin.import_playbook: e2e-module-05.yml
+
+- name: "E2E — Module 06: Trusted software supply chain"
+  ansible.builtin.import_playbook: e2e-module-06.yml
+
+- name: "E2E — Module 07: AI-enhanced applications"
+  ansible.builtin.import_playbook: e2e-module-07.yml

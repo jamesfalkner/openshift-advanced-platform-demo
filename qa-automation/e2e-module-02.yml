@@ -1,0 +1,327 @@
+---
+# =============================================================================
+# E2E — Module 02: CI/CD pipeline (the core end-to-end flow)
+# =============================================================================
+#
+# Demo outcome being validated (not the UI clicks):
+#   A developer commit flows through the platform automatically:
+#     git push  →  Tekton pipeline (build/scan/push)  →  Argo CD sync  →  the
+#     new claims-statistics endpoint is live in the dev environment.
+#
+# Instead of driving DevSpaces + the Source Control view + Roo Code AI, we:
+#   1. Mint a GitLab API token (OAuth password grant, root/common_password).
+#   2. Commit the CLEAN ClaimsStatsResource.java to main via the Commits API
+#      (this is the end state after the demo's "AI fixes the code smells" step —
+#      we assert the deterministic outcome, not the non-deterministic LLM run).
+#   3. Wait for a Tekton PipelineRun in the build namespace to Succeed.
+#   4. Wait for the Argo CD parasol-insurance-dev app to be Synced + Healthy.
+#   5. GET /api/claims/stats on the dev route and assert HTTP 200 + JSON.
+#
+# This is a MUTATING test (pushes to main). Run it against a test/validation
+# instance, not a live customer-facing one.
+#
+# Usage:
+#   ansible-playbook qa-automation/e2e-module-02.yml \
+#     -e "ocp_api_url=https://api.cluster-xxx:6443" \
+#     -e "ocp_admin_password=xxx" -e "common_password=openshift"
+# =============================================================================
+
+- name: "E2E Module 02: CI/CD pipeline"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    common_password: "{{ common_password | default('openshift') }}"
+    gitlab_root_user: root
+    gitlab_group: parasol
+    gitlab_project: parasol-insurance
+    gitlab_project_ref: "parasol%2Fparasol-insurance"
+    stats_file_path: "src/main/java/com/parasol/ClaimsStatsResource.java"
+    ns_build: parasol-insurance-build
+    ns_dev: parasol-insurance-dev
+    argocd_ns: rhdh-gitops
+    argocd_app_dev: parasol-insurance-dev
+    stats_endpoint_path: "/api/claims/stats"
+    pipeline_retries: 90
+    pipeline_delay: 10
+
+  tasks:
+    # --- Auth -------------------------------------------------------------
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift (CLI mode)
+      ansible.builtin.command:
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth (CLI mode)
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # --- GitLab API token (OAuth password grant) -------------------------
+    - name: Get GitLab route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: gitlab
+        name: gitlab
+      register: r_gitlab_route
+
+    - name: Fail if GitLab route missing
+      ansible.builtin.fail:
+        msg: "GitLab route gitlab/gitlab not found — cannot drive the pipeline."
+      when: r_gitlab_route.resources | length == 0
+
+    - name: Set GitLab URL
+      ansible.builtin.set_fact:
+        _gitlab_url: "https://{{ r_gitlab_route.resources[0].spec.host }}"
+
+    - name: Mint GitLab API token via OAuth password grant
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/oauth/token"
+        method: POST
+        body_format: json
+        body:
+          grant_type: password
+          username: "{{ gitlab_root_user }}"
+          password: "{{ common_password }}"
+        validate_certs: false
+        status_code: [200]
+      register: r_gitlab_oauth
+      no_log: true
+
+    - name: Set GitLab token
+      ansible.builtin.set_fact:
+        _gitlab_token: "{{ r_gitlab_oauth.json.access_token }}"
+      no_log: true
+
+    - name: Resolve project id
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/api/v4/projects/{{ gitlab_project_ref }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ _gitlab_token }}"
+        validate_certs: false
+        status_code: [200]
+      register: r_project
+
+    - name: Set project id
+      ansible.builtin.set_fact:
+        _project_id: "{{ r_project.json.id }}"
+
+    # --- Record pre-push time to correlate the new PipelineRun ------------
+    - name: Record push timestamp
+      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+      register: r_now
+      changed_when: false
+
+    - name: Set marker time
+      ansible.builtin.set_fact:
+        _push_time: "{{ r_now.stdout }}"
+
+    # --- Determine whether the stats file already exists ------------------
+    - name: Check if stats file exists on main
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ stats_file_path | urlencode }}?ref=main"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ _gitlab_token }}"
+        validate_certs: false
+        status_code: [200, 404]
+      register: r_file_check
+
+    - name: Choose commit action (create vs update)
+      ansible.builtin.set_fact:
+        _commit_action: "{{ 'update' if (r_file_check.status == 200) else 'create' }}"
+
+    # --- Commit the CLEAN endpoint (post-AI-fix end state) ----------------
+    - name: Commit clean ClaimsStatsResource.java to main
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/commits"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _gitlab_token }}"
+        body_format: json
+        body:
+          branch: main
+          commit_message: "qa-e2e: add/refresh claims statistics endpoint"
+          actions:
+            - action: "{{ _commit_action }}"
+              file_path: "{{ stats_file_path }}"
+              content: |
+                package com.parasol;
+
+                import java.util.HashMap;
+                import java.util.Map;
+
+                import io.quarkus.logging.Log;
+                import jakarta.ws.rs.GET;
+                import jakarta.ws.rs.Path;
+                import jakarta.ws.rs.Produces;
+                import jakarta.ws.rs.core.MediaType;
+
+                @Path("/api/claims/stats")
+                @Produces(MediaType.APPLICATION_JSON)
+                public class ClaimsStatsResource {
+
+                    private final ClaimsResource claimsResource;
+
+                    public ClaimsStatsResource(ClaimsResource claimsResource) {
+                        this.claimsResource = claimsResource;
+                    }
+
+                    @GET
+                    public Map<String, Object> getStats() {
+                        Map<String, Object> stats = new HashMap<>();
+                        Log.info("Fetching claim statistics");
+                        var claims = claimsResource.getAllClaims();
+                        stats.put("total", claims.size());
+                        Map<String, Long> byCategory = new HashMap<>();
+                        for (var claim : claims) {
+                            byCategory.merge(claim.getCategory(), 1L, Long::sum);
+                        }
+                        stats.put("by_category", byCategory);
+                        Map<String, Long> byStatus = new HashMap<>();
+                        for (var claim : claims) {
+                            byStatus.merge(claim.getStatus(), 1L, Long::sum);
+                        }
+                        stats.put("by_status", byStatus);
+                        return stats;
+                    }
+                }
+        validate_certs: false
+        status_code: [201]
+      register: r_commit
+
+    # --- Wait for the triggered PipelineRun to succeed -------------------
+    - name: Wait for a PipelineRun created after the push to appear
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns_build }}"
+      register: r_prs
+      until: >-
+        r_prs.resources | selectattr('metadata.creationTimestamp', 'ge', _push_time) | list | length > 0
+      retries: 20
+      delay: 10
+
+    - name: Select latest PipelineRun since the push
+      ansible.builtin.set_fact:
+        _pr_name: >-
+          {{ (r_prs.resources | selectattr('metadata.creationTimestamp', 'ge', _push_time)
+              | sort(attribute='metadata.creationTimestamp') | last).metadata.name }}
+
+    - name: Wait for PipelineRun to Succeed
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns_build }}"
+        name: "{{ _pr_name }}"
+      register: r_pr_status
+      until:
+        - r_pr_status.resources[0].status.conditions is defined
+        - >-
+          r_pr_status.resources[0].status.conditions
+          | selectattr('type', 'equalto', 'Succeeded')
+          | selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: "{{ pipeline_retries }}"
+      delay: "{{ pipeline_delay }}"
+
+    # --- Wait for Argo CD to deliver the change --------------------------
+    - name: Wait for Argo CD dev app Synced + Healthy
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        namespace: "{{ argocd_ns }}"
+        name: "{{ argocd_app_dev }}"
+      register: r_argo
+      until:
+        - r_argo.resources | length > 0
+        - (r_argo.resources[0].status.sync.status | default('')) == 'Synced'
+        - (r_argo.resources[0].status.health.status | default('')) == 'Healthy'
+      retries: 60
+      delay: 10
+
+    # --- Verify the endpoint is live ------------------------------------
+    - name: Find Parasol dev route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ ns_dev }}"
+      register: r_dev_routes
+
+    - name: Select a parasol route host
+      ansible.builtin.set_fact:
+        _parasol_host: >-
+          {{ (r_dev_routes.resources | selectattr('spec.host', 'search', 'parasol')
+              | list | first | default(r_dev_routes.resources | first)).spec.host }}
+
+    - name: GET the claims stats endpoint (retry until app rolls out)
+      ansible.builtin.uri:
+        url: "https://{{ _parasol_host }}{{ stats_endpoint_path }}"
+        method: GET
+        validate_certs: false
+        return_content: true
+        status_code: [200]
+      register: r_stats
+      until:
+        - r_stats.status == 200
+        - "'total' in (r_stats.content | default(''))"
+      retries: 30
+      delay: 10
+
+    # --- Summary --------------------------------------------------------
+    - name: "Module 02 — PASSED"
+      ansible.builtin.debug:
+        msg: |
+          CI/CD end-to-end verified:
+          - PipelineRun succeeded: {{ _pr_name }}
+          - Argo CD {{ argocd_app_dev }} Synced + Healthy
+          - {{ stats_endpoint_path }} live on https://{{ _parasol_host }}

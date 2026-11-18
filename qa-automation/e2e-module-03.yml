@@ -1,0 +1,178 @@
+---
+# =============================================================================
+# E2E — Module 03: Platform operations
+# =============================================================================
+#
+# Demo outcomes being validated (not the UI clicks):
+#   - Traffic management / security: Service Mesh (Istio) control plane is Ready.
+#   - Observability: Kiali is deployed and its route answers.
+#   - Autoscaling: a HorizontalPodAutoscaler exists for the Parasol app.
+#   - External secrets: Vault-backed ExternalSecrets are reconciled (Ready).
+#
+# Read-only. "Point out the graph / the scaled pods" are visual confirmations of
+# these same facts, which we assert directly.
+# =============================================================================
+
+- name: "E2E Module 03: Platform operations"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    ns_dev: parasol-insurance-dev
+    e2e_failures: []
+
+  tasks:
+    # --- Auth -------------------------------------------------------------
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift (CLI mode)
+      ansible.builtin.command:
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth (CLI mode)
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # --- Service Mesh control plane ready (Sail operator: kind Istio) -----
+    - name: Get Istio control plane
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: sailoperator.io/v1
+        kind: Istio
+      register: r_istio
+      ignore_errors: true
+
+    - name: Record Service Mesh not Ready
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Service Mesh (Istio) control plane not found or not Ready'] }}"
+      when: >-
+        r_istio.resources | default([]) | length == 0
+        or (r_istio.resources[0].status.conditions | default([])
+            | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True') | list | length == 0)
+
+    # --- Kiali observability ---------------------------------------------
+    - name: Get Kiali route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: istio-system
+        name: kiali
+      register: r_kiali_route
+      ignore_errors: true
+
+    - name: HTTP-check Kiali
+      ansible.builtin.uri:
+        url: "https://{{ r_kiali_route.resources[0].spec.host }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 302, 401, 403]
+        timeout: 20
+      register: r_kiali_http
+      when: r_kiali_route.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record Kiali unreachable
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Kiali route not found or not responding'] }}"
+      when: >-
+        r_kiali_route.resources | default([]) | length == 0
+        or (r_kiali_http is defined and r_kiali_http is failed)
+
+    # --- Autoscaling: HPA present for the Parasol app --------------------
+    - name: Get HPAs in dev namespace
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: autoscaling/v2
+        kind: HorizontalPodAutoscaler
+        namespace: "{{ ns_dev }}"
+      register: r_hpa
+      ignore_errors: true
+
+    - name: Record no HPA configured
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['No HorizontalPodAutoscaler found in ' + ns_dev] }}"
+      when: r_hpa.resources | default([]) | length == 0
+
+    # --- External secrets reconciled ------------------------------------
+    - name: Get ExternalSecrets
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+      register: r_es
+      ignore_errors: true
+
+    - name: Record ExternalSecrets not Ready
+      ansible.builtin.set_fact:
+        e2e_failures: >-
+          {{ e2e_failures + ['ExternalSecret ' + item.metadata.namespace + '/' +
+             item.metadata.name + ' not Ready'] }}
+      loop: "{{ r_es.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      when: >-
+        item.status is not defined
+        or (item.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True') | list | length == 0)
+
+    - name: Record no ExternalSecrets at all
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['No ExternalSecrets found — Vault integration missing'] }}"
+      when: r_es.resources | default([]) | length == 0
+
+    # --- Summary --------------------------------------------------------
+    - name: "Module 03 — PASSED"
+      ansible.builtin.debug:
+        msg: "Platform operations outcomes verified (Mesh, Kiali, HPA, External Secrets)."
+      when: e2e_failures | length == 0
+
+    - name: "Module 03 — FAILED"
+      ansible.builtin.fail:
+        msg: |
+          {{ e2e_failures | length }} issue(s):
+          {% for f in e2e_failures %}  - {{ f }}
+          {% endfor %}
+      when: e2e_failures | length > 0

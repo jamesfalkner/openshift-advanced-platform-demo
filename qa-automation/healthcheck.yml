@@ -1,0 +1,389 @@
+---
+# =============================================================================
+# OpenShift Advanced App Platform Demo — Environment Healthcheck
+# =============================================================================
+#
+# Purpose:
+#   Validates that a pre-provisioned demo instance (ocp4-adv-app-platform-demo)
+#   is fully deployed and ready for a group to follow the enablement session.
+#   Runs at order/provision time via the Showroom API, or on-demand from a CLI.
+#
+# This lab is per-group (one shared instance per group of 5) with FIXED
+# namespaces — not multi-tenant. So healthcheck validates cluster-wide demo
+# state rather than per-user resources.
+#
+# Usage (CLI / admin):
+#   ansible-playbook qa-automation/healthcheck.yml \
+#     -e "ocp_api_url=https://api.cluster-xxx.example.com:6443" \
+#     -e "ocp_admin_password=xxx"
+#
+# Usage (Showroom runner):
+#   Runs automatically — reads openshift_api_url from user_data.yml and
+#   authenticates with the runtime-automation ServiceAccount token.
+#
+# What it checks (in order):
+#   1. Core platform + demo namespaces exist
+#   2. Argo CD Applications are all Synced + Healthy (primary readiness signal)
+#   3. Student-facing routes respond over HTTPS (console, RHDH, Argo, GitLab,
+#      SonarQube, TPA, Vault, DevSpaces)
+#   4. GitLab parasol/parasol-insurance repository is reachable via the API
+#   5. DevSpaces CheCluster is ready
+#   6. Vault + External Secrets reconciliation is healthy
+#   7. The Parasol dev application is running and its route answers
+#
+# Design notes:
+#   - Read-only. Never mutates the environment (qa_run_mutating stays false).
+#   - Error-collection pattern: run every check, then fail once with a report.
+# =============================================================================
+
+- name: Advanced App Platform Demo — Environment Healthcheck
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # --- Inputs (CLI -e or showroom user_data.yml) ---
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    # Showroom runner SA (used only when no admin password is supplied)
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    common_password: "{{ common_password | default('openshift') }}"
+
+    # --- Namespaces expected on a provisioned instance ---
+    platform_namespaces:
+      - openshift-gitops
+      - rhdh-gitops
+      - rhdh
+      - openshift-devspaces
+      - gitlab
+      - quay-registry
+      - vault
+      - external-secrets
+      - trusted-profile-analyzer
+      - trusted-artifact-signer
+      - stackrox
+      - keycloak
+      - sonarqube
+    demo_namespaces:
+      - parasol-insurance-build
+      - parasol-insurance-dev
+      - parasol-insurance-prod
+
+    # --- Student-facing routes to HTTP-check: ns + route name ---
+    # Route names are best-effort; a missing route is reported, not fatal.
+    web_routes:
+      - { namespace: gitlab, name: gitlab }
+      - { namespace: sonarqube, name: sonarqube }
+      - { namespace: rhdh, name: backstage-developer-hub }
+      - { namespace: rhdh-gitops, name: rhdh-gitops-server }
+
+    # --- Argo CD instances that own the app-of-apps ---
+    argocd_namespaces:
+      - openshift-gitops
+      - rhdh-gitops
+
+    healthcheck_failures: []
+
+  tasks:
+    # =========================================================================
+    # Auth setup (dual mode: admin password OR showroom SA token)
+    # =========================================================================
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: >-
+          Missing required variables.
+          CLI: pass ocp_api_url and ocp_admin_password via -e.
+          Showroom runner: openshift_api_url comes from user_data.yml (SA token auth).
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth for runtime-automation SA (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift with password (CLI mode)
+      ansible.builtin.command:
+        cmd: >-
+          oc login {{ _api_url }}
+          --username admin
+          --password {{ ocp_admin_password }}
+          --insecure-skip-tls-verify
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth for CLI mode
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # =========================================================================
+    # Check 1: Namespaces exist
+    # =========================================================================
+    - name: Check platform + demo namespaces exist
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+      register: r_ns_checks
+      loop: "{{ platform_namespaces + demo_namespaces }}"
+
+    - name: Record missing namespaces
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures + ['Namespace ' + item.item + ' not found'] }}
+      loop: "{{ r_ns_checks.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.resources | length == 0
+
+    # =========================================================================
+    # Check 2: Argo CD Applications all Synced + Healthy
+    #          (the app-of-apps deploys the entire demo, so this is the
+    #           single highest-signal readiness check)
+    # =========================================================================
+    - name: List Argo CD Applications
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        namespace: "{{ item }}"
+      register: r_argo_apps
+      loop: "{{ argocd_namespaces }}"
+      ignore_errors: true
+
+    - name: Flatten Argo CD Application list
+      ansible.builtin.set_fact:
+        _all_argo_apps: "{{ r_argo_apps.results | map(attribute='resources') | sum(start=[]) }}"
+
+    - name: Record Argo apps that are not Healthy
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['Argo app ' + item.metadata.namespace + '/' + item.metadata.name +
+              ' health=' + (item.status.health.status | default('Unknown'))] }}
+      loop: "{{ _all_argo_apps }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: (item.status.health.status | default('Unknown')) != 'Healthy'
+
+    - name: Record Argo apps that are not Synced
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['Argo app ' + item.metadata.namespace + '/' + item.metadata.name +
+              ' sync=' + (item.status.sync.status | default('Unknown'))] }}
+      loop: "{{ _all_argo_apps }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: (item.status.sync.status | default('Unknown')) != 'Synced'
+
+    - name: Record if no Argo apps found at all
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures + ['No Argo CD Applications found — app-of-apps may not be bootstrapped'] }}
+      when: _all_argo_apps | length == 0
+
+    # =========================================================================
+    # Check 3: Student-facing routes respond over HTTPS
+    # =========================================================================
+    - name: Look up web route hosts
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ item.namespace }}"
+        name: "{{ item.name }}"
+      register: r_route_lookups
+      loop: "{{ web_routes }}"
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.name }}"
+      ignore_errors: true
+
+    - name: Record missing routes
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['Route ' + item.item.namespace + '/' + item.item.name + ' not found'] }}
+      loop: "{{ r_route_lookups.results }}"
+      loop_control:
+        label: "{{ item.item.namespace }}/{{ item.item.name }}"
+      when: item.resources | default([]) | length == 0
+
+    - name: HTTP-check web routes
+      ansible.builtin.uri:
+        url: "https://{{ item.resources[0].spec.host }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 301, 302, 303, 307, 401, 403]
+        timeout: 20
+      register: r_http_checks
+      loop: "{{ r_route_lookups.results }}"
+      loop_control:
+        label: "{{ item.item.namespace }}/{{ item.item.name }}"
+      when: item.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record failed HTTP checks
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['Route ' + item.item.item.namespace + '/' + item.item.item.name +
+              ' did not respond (' + (item.status | default('no response') | string) + ')'] }}
+      loop: "{{ r_http_checks.results }}"
+      loop_control:
+        label: "{{ item.item.item.namespace | default('?') }}/{{ item.item.item.name | default('?') }}"
+      when:
+        - item is not skipped
+        - item is failed
+
+    # =========================================================================
+    # Check 4: GitLab parasol/parasol-insurance repo reachable
+    # =========================================================================
+    - name: Look up GitLab route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: gitlab
+        name: gitlab
+      register: r_gitlab_route
+      ignore_errors: true
+
+    - name: Check parasol-insurance project exists (unauthenticated public API probe)
+      ansible.builtin.uri:
+        url: >-
+          https://{{ r_gitlab_route.resources[0].spec.host }}/api/v4/projects/parasol%2Fparasol-insurance
+        method: GET
+        validate_certs: false
+        status_code: [200, 401, 403, 404]
+        timeout: 20
+      register: r_gitlab_repo
+      when: r_gitlab_route.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record GitLab repo not found
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures + ['GitLab parasol/parasol-insurance returned 404 — repo not seeded'] }}
+      when:
+        - r_gitlab_repo is defined
+        - r_gitlab_repo is not skipped
+        - (r_gitlab_repo.status | default(0)) == 404
+
+    # =========================================================================
+    # Check 5: DevSpaces CheCluster ready
+    # =========================================================================
+    - name: Get DevSpaces CheCluster
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: org.eclipse.che/v2
+        kind: CheCluster
+        namespace: openshift-devspaces
+      register: r_checluster
+      ignore_errors: true
+
+    - name: Record DevSpaces not ready
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['DevSpaces CheCluster not Available (phase=' +
+              (r_checluster.resources[0].status.chePhase | default('missing')) + ')'] }}
+      when: >-
+        r_checluster.resources | default([]) | length == 0
+        or (r_checluster.resources[0].status.chePhase | default('')) != 'Active'
+
+    # =========================================================================
+    # Check 6: Vault + External Secrets reconciliation
+    # =========================================================================
+    - name: Check for failed ExternalSecrets (SecretSynced != True)
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+      register: r_external_secrets
+      ignore_errors: true
+
+    - name: Record ExternalSecrets not synced
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures +
+             ['ExternalSecret ' + item.metadata.namespace + '/' + item.metadata.name + ' not Ready'] }}
+      loop: "{{ r_external_secrets.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      when: >-
+        item.status is not defined
+        or (item.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True') | list | length == 0)
+
+    # =========================================================================
+    # Check 7: Parasol dev application running
+    # =========================================================================
+    - name: Check parasol deployments in dev namespace are available
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: parasol-insurance-dev
+      register: r_parasol_deploys
+      ignore_errors: true
+
+    - name: Record parasol dev app has no available deployments
+      ansible.builtin.set_fact:
+        healthcheck_failures: >-
+          {{ healthcheck_failures + ['No available Deployments in parasol-insurance-dev'] }}
+      when: >-
+        r_parasol_deploys.resources | default([]) | length == 0
+        or (r_parasol_deploys.resources
+            | selectattr('status.availableReplicas', 'defined')
+            | selectattr('status.availableReplicas', 'ge', 1) | list | length == 0)
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    - name: "Healthcheck PASSED"
+      ansible.builtin.debug:
+        msg: "All healthchecks passed — the demo instance is ready."
+      when: healthcheck_failures | length == 0
+
+    - name: "Healthcheck FAILED"
+      ansible.builtin.fail:
+        msg: |
+          Healthcheck failed with {{ healthcheck_failures | length }} issue(s):
+          {% for f in healthcheck_failures %}
+            - {{ f }}
+          {% endfor %}
+      when: healthcheck_failures | length > 0

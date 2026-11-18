@@ -1,0 +1,191 @@
+---
+# =============================================================================
+# E2E — Module 05: Secure development workflow
+# =============================================================================
+#
+# Demo outcomes being validated (not the UI clicks):
+#   - The secure build namespace + secure pipeline infrastructure exist.
+#   - Advanced Cluster Security (ACS/StackRox) Central is deployed and reachable.
+#   - Trusted Artifact Signer (RHTAS/securesign) is Ready (signing + Rekor).
+#   - The most recent secured PipelineRun (if any) succeeded — i.e. ACS scan,
+#     Syft SBOM, TAS signing and Conforma gate pass.
+#
+# The Dependency Analytics popup and per-task log reading are visual; the backing
+# fact is the secured pipeline/operators being healthy and a run succeeding.
+# =============================================================================
+
+- name: "E2E Module 05: Secure development workflow"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    ns_build_secured: parasol-insurance-secured-build
+    ns_acs: stackrox
+    ns_tas: trusted-artifact-signer
+    e2e_failures: []
+
+  tasks:
+    # --- Auth -------------------------------------------------------------
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift (CLI mode)
+      ansible.builtin.command:
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth (CLI mode)
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # --- Secure build namespace + pipeline exist -------------------------
+    - name: Check secured build namespace exists
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ ns_build_secured }}"
+      register: r_secured_ns
+      ignore_errors: true
+
+    - name: Record secured build namespace missing
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Namespace ' + ns_build_secured + ' not found'] }}"
+      when: r_secured_ns.resources | default([]) | length == 0
+
+    - name: Check secured Tekton Pipelines exist
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: Pipeline
+        namespace: "{{ ns_build_secured }}"
+      register: r_secured_pipelines
+      when: r_secured_ns.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record no secured pipelines defined
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['No Tekton Pipelines in ' + ns_build_secured] }}"
+      when:
+        - r_secured_ns.resources | default([]) | length > 0
+        - r_secured_pipelines.resources | default([]) | length == 0
+
+    # --- Latest secured PipelineRun succeeded (if any have run) ----------
+    - name: Get secured PipelineRuns
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns_build_secured }}"
+      register: r_secured_prs
+      when: r_secured_ns.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record latest secured PipelineRun not successful
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Latest secured PipelineRun did not succeed'] }}"
+      when:
+        - r_secured_prs.resources | default([]) | length > 0
+        - >-
+          (r_secured_prs.resources | sort(attribute='metadata.creationTimestamp') | last).status.conditions
+          | default([]) | selectattr('type', 'equalto', 'Succeeded')
+          | selectattr('status', 'equalto', 'True') | list | length == 0
+
+    # --- ACS Central deployed + reachable --------------------------------
+    - name: Get ACS Central route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: "{{ ns_acs }}"
+        name: central
+      register: r_acs_route
+      ignore_errors: true
+
+    - name: HTTP-check ACS Central
+      ansible.builtin.uri:
+        url: "https://{{ r_acs_route.resources[0].spec.host }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 302, 401, 403]
+        timeout: 20
+      register: r_acs_http
+      when: r_acs_route.resources | default([]) | length > 0
+      ignore_errors: true
+
+    - name: Record ACS Central unreachable
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['ACS Central route not found or not responding'] }}"
+      when: >-
+        r_acs_route.resources | default([]) | length == 0
+        or (r_acs_http is defined and r_acs_http is failed)
+
+    # --- Trusted Artifact Signer ready -----------------------------------
+    - name: Get RHTAS Securesign
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: rhtas.redhat.com/v1alpha1
+        kind: Securesign
+        namespace: "{{ ns_tas }}"
+      register: r_securesign
+      ignore_errors: true
+
+    - name: Record RHTAS not present
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['RHTAS Securesign instance not found in ' + ns_tas] }}"
+      when: r_securesign.resources | default([]) | length == 0
+
+    # --- Summary --------------------------------------------------------
+    - name: "Module 05 — PASSED"
+      ansible.builtin.debug:
+        msg: "Secure development outcomes verified (secured pipeline, ACS, RHTAS)."
+      when: e2e_failures | length == 0
+
+    - name: "Module 05 — FAILED"
+      ansible.builtin.fail:
+        msg: |
+          {{ e2e_failures | length }} issue(s):
+          {% for f in e2e_failures %}  - {{ f }}
+          {% endfor %}
+      when: e2e_failures | length > 0

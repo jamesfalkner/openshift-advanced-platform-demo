@@ -1,0 +1,196 @@
+---
+# =============================================================================
+# E2E — Module 01: Developer experience (dev inner loop)
+# =============================================================================
+#
+# Demo outcome being validated (not the UI clicks):
+#   - The Parasol application is running in the dev namespace (the "blue donut"
+#     the presenter points at in Topology).
+#   - DevSpaces is operational so a developer can open a workspace.
+#   - The platform-engineer "add a DevSpaces sample" step works at the API level
+#     (optional, only when qa_run_mutating=true): apply the getting-started
+#     samples ConfigMap and confirm the operator-recognised labels are present.
+#
+# Pure talk track (MTA modernization) and visual-only steps are intentionally
+# not automated — they have no deterministic machine outcome.
+#
+# Usage:
+#   ansible-playbook qa-automation/e2e-module-01.yml \
+#     -e "ocp_api_url=https://api.cluster-xxx:6443" -e "ocp_admin_password=xxx"
+# =============================================================================
+
+- name: "E2E Module 01: Developer experience"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    qa_run_mutating: "{{ qa_run_mutating | default(false) }}"
+    ns_dev: parasol-insurance-dev
+    ns_devspaces: openshift-devspaces
+    e2e_failures: []
+
+  tasks:
+    # --- Auth -------------------------------------------------------------
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift (CLI mode)
+      ansible.builtin.command:
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth (CLI mode)
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # --- Outcome 1: Parasol dev app is running ---------------------------
+    - name: Get Deployments in parasol dev namespace
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ ns_dev }}"
+      register: r_dev_deploys
+      ignore_errors: true
+
+    - name: Record parasol dev app not running
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['No available Deployments in ' + ns_dev + ' — Parasol app not running'] }}"
+      when: >-
+        r_dev_deploys.resources | default([]) | length == 0
+        or (r_dev_deploys.resources | selectattr('status.availableReplicas', 'defined')
+            | selectattr('status.availableReplicas', 'ge', 1) | list | length == 0)
+
+    # --- Outcome 2: DevSpaces is operational ----------------------------
+    - name: Get DevSpaces CheCluster
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: org.eclipse.che/v2
+        kind: CheCluster
+        namespace: "{{ ns_devspaces }}"
+      register: r_che
+      ignore_errors: true
+
+    - name: Record DevSpaces not Active
+      ansible.builtin.set_fact:
+        e2e_failures: >-
+          {{ e2e_failures + ['DevSpaces not Active (phase=' +
+             (r_che.resources[0].status.chePhase | default('missing')) + ')'] }}
+      when: >-
+        r_che.resources | default([]) | length == 0
+        or (r_che.resources[0].status.chePhase | default('')) != 'Active'
+
+    - name: Check DevSpaces dashboard route answers
+      when: r_che.resources | default([]) | length > 0
+      block:
+        - name: Get DevSpaces route
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: route.openshift.io/v1
+            kind: Route
+            namespace: "{{ ns_devspaces }}"
+            label_selectors:
+              - app.kubernetes.io/component=che-gateway
+          register: r_che_route
+          ignore_errors: true
+
+        - name: HTTP-check DevSpaces dashboard
+          ansible.builtin.uri:
+            url: "https://{{ r_che_route.resources[0].spec.host }}/dashboard/"
+            method: GET
+            validate_certs: false
+            status_code: [200, 302, 401, 403]
+            timeout: 20
+          register: r_che_http
+          when: r_che_route.resources | default([]) | length > 0
+          ignore_errors: true
+
+        - name: Record DevSpaces dashboard unreachable
+          ansible.builtin.set_fact:
+            e2e_failures: "{{ e2e_failures + ['DevSpaces dashboard route did not respond'] }}"
+          when:
+            - r_che_http is defined
+            - r_che_http is failed
+
+    # --- Outcome 3 (optional): PE "add DevSpaces sample" works ----------
+    - name: Apply getting-started-samples ConfigMap (PE self-service action)
+      kubernetes.core.k8s:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: getting-started-samples
+            namespace: "{{ ns_devspaces }}"
+            labels:
+              app.kubernetes.io/component: getting-started-samples
+              app.kubernetes.io/part-of: che.eclipse.org
+          data:
+            my-samples.json: |
+              [{"displayName":"QA E2E Sample","description":"Added by qa-automation e2e test",
+                "tags":["QA"],"url":"https://github.com/redhat-developer-demos/cde-ollama-continue"}]
+      register: r_sample_cm
+      when: qa_run_mutating | bool
+      ignore_errors: true
+
+    - name: Record sample ConfigMap apply failed
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Failed to apply getting-started-samples ConfigMap'] }}"
+      when:
+        - qa_run_mutating | bool
+        - r_sample_cm is defined
+        - r_sample_cm is failed
+
+    # --- Summary --------------------------------------------------------
+    - name: "Module 01 — PASSED"
+      ansible.builtin.debug:
+        msg: "Developer experience outcomes verified (Parasol dev app + DevSpaces ready)."
+      when: e2e_failures | length == 0
+
+    - name: "Module 01 — FAILED"
+      ansible.builtin.fail:
+        msg: |
+          {{ e2e_failures | length }} issue(s):
+          {% for f in e2e_failures %}  - {{ f }}
+          {% endfor %}
+      when: e2e_failures | length > 0

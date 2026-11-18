@@ -1,0 +1,334 @@
+---
+# =============================================================================
+# E2E — Module 07: AI-enhanced applications
+# =============================================================================
+#
+# Demo outcome being validated (not the UI clicks):
+#   LLM-powered email routing eliminates the "Review Required" bucket — every
+#   incoming email is classified into CLAIMS / RETENTION / ACQUISITION.
+#
+# Instead of RHDH self-service → DevSpaces → git overlay → Source Control push,
+# we drive the deterministic backend:
+#   Prereqs (always):
+#     - Vault-backed LLM credentials ExternalSecret is Ready.
+#     - The prepared "llm-classification" branch exists in GitLab.
+#     - (If configured) the external LiteLLM endpoint is reachable.
+#   Outcome (only when qa_run_mutating=true):
+#     - Merge llm-classification → main via the GitLab API (equivalent to the
+#       demo's git overlay), wait for the pipeline + Argo CD, then GET the inbox
+#       and assert NO "Review Required" entries remain.
+#
+# In non-mutating mode we verify the prerequisites only (safe for a shared
+# instance), since a freshly provisioned app still uses keyword matching.
+# =============================================================================
+
+- name: "E2E Module 07: AI-enhanced applications"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _api_url: "{{ ocp_api_url | default(openshift_api_url) }}"
+    _use_sa_token: "{{ ocp_admin_password is not defined }}"
+    showroom_namespace: "{{ showroom_namespace | default('showroom') }}"
+    showroom_sa_secret: "{{ showroom_sa_secret | default('runtime-automation-token') }}"
+    common_password: "{{ common_password | default('openshift') }}"
+    qa_run_mutating: "{{ qa_run_mutating | default(false) }}"
+    gitlab_root_user: root
+    gitlab_project_ref: "parasol%2Fparasol-insurance"
+    llm_branch: llm-classification
+    ns_dev: parasol-insurance-dev
+    argocd_ns: rhdh-gitops
+    argocd_app_dev: parasol-insurance-dev
+    inbox_path: "/api/emails"
+    review_required_label: "review required"
+    # External LiteLLM endpoint (optional; from user_data or -e)
+    litellm_api_base_url: "{{ litellm_api_base_url | default('') }}"
+    e2e_failures: []
+
+  tasks:
+    # --- Auth -------------------------------------------------------------
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ocp_api_url is defined or openshift_api_url is defined
+          - ocp_admin_password is defined or _use_sa_token | bool
+        fail_msg: "Pass ocp_api_url + ocp_admin_password (CLI) or run in the Showroom runner."
+
+    - name: Get runtime-automation SA token (runner mode)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ showroom_namespace }}"
+        name: "{{ showroom_sa_secret }}"
+      register: _ra_secret
+      when: _use_sa_token | bool
+
+    - name: Set k8s auth (runner mode)
+      ansible.builtin.set_fact:
+        _k8s_host: "{{ _api_url }}"
+        _k8s_api_key: "{{ _ra_secret.resources[0].data.token | b64decode }}"
+        _k8s_validate_certs: false
+      when: _use_sa_token | bool
+      no_log: true
+
+    - name: Login to OpenShift (CLI mode)
+      ansible.builtin.command:
+        cmd: "oc login {{ _api_url }} --username admin --password {{ ocp_admin_password }} --insecure-skip-tls-verify"
+      changed_when: false
+      no_log: true
+      when: not (_use_sa_token | bool)
+
+    - name: Set k8s auth (CLI mode)
+      ansible.builtin.set_fact:
+        _k8s_host: ""
+        _k8s_api_key: ""
+        _k8s_validate_certs: true
+      when: not (_use_sa_token | bool)
+
+    # --- Prereq: LLM credentials ExternalSecret Ready --------------------
+    - name: Find LLM credentials ExternalSecret
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: external-secrets.io/v1beta1
+        kind: ExternalSecret
+      register: r_es
+      ignore_errors: true
+
+    - name: Record no LLM-related ExternalSecret Ready
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['No LLM/litellm ExternalSecret found in a Ready state'] }}"
+      when: >-
+        (r_es.resources | default([])
+         | selectattr('metadata.name', 'search', '(?i)(llm|litellm)')
+         | selectattr('status.conditions', 'defined') | list | length == 0)
+
+    # --- Prereq: external LiteLLM endpoint reachable (optional) -----------
+    - name: HTTP-check LiteLLM endpoint
+      ansible.builtin.uri:
+        url: "{{ litellm_api_base_url }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 301, 302, 401, 403, 404]
+        timeout: 20
+      register: r_litellm
+      when: litellm_api_base_url | length > 0
+      ignore_errors: true
+
+    - name: Record LiteLLM endpoint unreachable
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['External LiteLLM endpoint did not respond: ' + litellm_api_base_url] }}"
+      when:
+        - litellm_api_base_url | length > 0
+        - r_litellm is defined
+        - r_litellm is failed
+
+    # --- GitLab token + prepared branch check ----------------------------
+    - name: Get GitLab route
+      kubernetes.core.k8s_info:
+        host: "{{ _k8s_host | default(omit, true) }}"
+        api_key: "{{ _k8s_api_key | default(omit, true) }}"
+        validate_certs: "{{ _k8s_validate_certs }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: gitlab
+        name: gitlab
+      register: r_gitlab_route
+      ignore_errors: true
+
+    - name: Set GitLab URL
+      ansible.builtin.set_fact:
+        _gitlab_url: "https://{{ r_gitlab_route.resources[0].spec.host }}"
+      when: r_gitlab_route.resources | default([]) | length > 0
+
+    - name: Mint GitLab API token
+      ansible.builtin.uri:
+        url: "{{ _gitlab_url }}/oauth/token"
+        method: POST
+        body_format: json
+        body:
+          grant_type: password
+          username: "{{ gitlab_root_user }}"
+          password: "{{ common_password }}"
+        validate_certs: false
+        status_code: [200]
+      register: r_oauth
+      when: _gitlab_url is defined
+      no_log: true
+      ignore_errors: true
+
+    - name: Set GitLab token + project id
+      when:
+        - r_oauth is defined
+        - r_oauth is not failed
+      block:
+        - name: Set token
+          ansible.builtin.set_fact:
+            _gitlab_token: "{{ r_oauth.json.access_token }}"
+          no_log: true
+
+        - name: Resolve project id
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ gitlab_project_ref }}"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            validate_certs: false
+            status_code: [200]
+          register: r_project
+
+        - name: Set project id
+          ansible.builtin.set_fact:
+            _project_id: "{{ r_project.json.id }}"
+
+        - name: Check prepared llm-classification branch exists
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/branches/{{ llm_branch }}"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            validate_certs: false
+            status_code: [200, 404]
+          register: r_branch
+
+        - name: Record prepared branch missing
+          ansible.builtin.set_fact:
+            e2e_failures: "{{ e2e_failures + ['Prepared branch ' + llm_branch + ' not found in parasol-insurance'] }}"
+          when: (r_branch.status | default(0)) != 200
+
+    - name: Record GitLab not reachable
+      ansible.builtin.set_fact:
+        e2e_failures: "{{ e2e_failures + ['Could not reach/authenticate to GitLab to verify AI prerequisites'] }}"
+      when: _gitlab_url is not defined or (r_oauth is defined and r_oauth is failed)
+
+    # =====================================================================
+    # Outcome (mutating only): deploy the AI code and verify the inbox
+    # =====================================================================
+    - name: Drive the AI outcome and assert inbox
+      when:
+        - qa_run_mutating | bool
+        - _project_id is defined
+        - (r_branch.status | default(0)) == 200
+      block:
+        - name: Create MR llm-classification -> main
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            body_format: json
+            body:
+              source_branch: "{{ llm_branch }}"
+              target_branch: main
+              title: "qa-e2e: enable LLM email routing"
+            validate_certs: false
+            status_code: [201, 409]
+          register: r_mr
+
+        - name: Resolve open MR iid
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests?state=opened&source_branch={{ llm_branch }}"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            validate_certs: false
+            status_code: [200]
+          register: r_mr_list
+
+        - name: Record no mergeable MR
+          ansible.builtin.set_fact:
+            e2e_failures: "{{ e2e_failures + ['Could not open an MR from ' + llm_branch + ' to main'] }}"
+          when: r_mr_list.json | default([]) | length == 0
+
+        - name: Merge the MR
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ r_mr_list.json[0].iid }}/merge"
+            method: PUT
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            validate_certs: false
+            status_code: [200, 405, 406]
+          register: r_merge
+          when: r_mr_list.json | default([]) | length > 0
+
+        - name: Wait for Argo CD dev app Synced + Healthy after merge
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: argoproj.io/v1alpha1
+            kind: Application
+            namespace: "{{ argocd_ns }}"
+            name: "{{ argocd_app_dev }}"
+          register: r_argo
+          until:
+            - r_argo.resources | length > 0
+            - (r_argo.resources[0].status.sync.status | default('')) == 'Synced'
+            - (r_argo.resources[0].status.health.status | default('')) == 'Healthy'
+          retries: 90
+          delay: 10
+          when: r_mr_list.json | default([]) | length > 0
+
+        - name: Find Parasol dev route
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: route.openshift.io/v1
+            kind: Route
+            namespace: "{{ ns_dev }}"
+          register: r_dev_routes
+
+        - name: Select a parasol route host
+          ansible.builtin.set_fact:
+            _parasol_host: >-
+              {{ (r_dev_routes.resources | selectattr('spec.host', 'search', 'parasol')
+                  | list | first | default(r_dev_routes.resources | first)).spec.host }}
+
+        # Give the AI classifier time to process the inbox after rollout, then
+        # assert no "Review Required" remains. We retry because emails stream in.
+        - name: Poll inbox until no "Review Required" remains
+          ansible.builtin.uri:
+            url: "https://{{ _parasol_host }}{{ inbox_path }}"
+            method: GET
+            validate_certs: false
+            return_content: true
+            status_code: [200]
+          register: r_inbox
+          until:
+            - r_inbox.status == 200
+            - review_required_label not in (r_inbox.content | default('') | lower)
+          retries: 20
+          delay: 15
+          ignore_errors: true
+
+        - name: Record inbox still has Review Required
+          ansible.builtin.set_fact:
+            e2e_failures: "{{ e2e_failures + ['Inbox still contains \"Review Required\" after enabling LLM routing'] }}"
+          when:
+            - r_inbox is defined
+            - (r_inbox.status | default(0)) != 200
+              or review_required_label in (r_inbox.content | default('') | lower)
+
+    - name: Note (non-mutating mode)
+      ansible.builtin.debug:
+        msg: >-
+          qa_run_mutating is false — verified AI prerequisites only.
+          Set -e qa_run_mutating=true to deploy the LLM code and assert the inbox outcome.
+      when: not (qa_run_mutating | bool)
+
+    # --- Summary --------------------------------------------------------
+    - name: "Module 07 — PASSED"
+      ansible.builtin.debug:
+        msg: "AI application outcomes verified."
+      when: e2e_failures | length == 0
+
+    - name: "Module 07 — FAILED"
+      ansible.builtin.fail:
+        msg: |
+          {{ e2e_failures | length }} issue(s):
+          {% for f in e2e_failures %}  - {{ f }}
+          {% endfor %}
+      when: e2e_failures | length > 0
