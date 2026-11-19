@@ -172,19 +172,29 @@
                       '%s/apis/tekton.dev/v1/namespaces/%s/pipelineruns?labelSelector=%s' % (api, ns, sel),
                       headers={'Authorization': 'Bearer ' + ktok})
                   return json.loads(urllib.request.urlopen(r, context=ctx).read()).get('items', [])
+              # Heartbeat: this loop can wait up to ~15 min per attempt with no
+              # output. Printing a progress line each poll keeps the Showroom SSE
+              # stream warm (idle connections get dropped by the router) and lets
+              # the viewer see that it is actively waiting rather than hung.
               last = ''
               for attempt in range(3):
                   tag = 'qa-e2e-%d-%d' % (int(time.time()), attempt)
                   tag_push(tag)
+                  print('attempt %d: pushed tag %s, waiting for tag-promote pipeline...'
+                        % (attempt, tag), flush=True)
                   status = ''
-                  for _ in range(90):
+                  for i in range(90):
                       time.sleep(10)
-                      cand = [i for i in pipelineruns()
+                      cand = [pr for pr in pipelineruns()
                               if any(p.get('name') == 'git-tag' and p.get('value') == tag
-                                     for p in i.get('spec', {}).get('params', []))]
+                                     for p in pr.get('spec', {}).get('params', []))]
                       if not cand:
+                          print('  ...%ds: no pipelinerun for %s yet' % ((i + 1) * 10, tag),
+                                flush=True)
                           continue
                       conds = cand[0].get('status', {}).get('conditions', [])
+                      state = (conds[0].get('reason') if conds else None) or 'pending'
+                      print('  ...%ds: pipeline %s' % ((i + 1) * 10, state), flush=True)
                       if conds and conds[0].get('type') == 'Succeeded':
                           if conds[0].get('status') == 'True':
                               status = 'Succeeded'; break

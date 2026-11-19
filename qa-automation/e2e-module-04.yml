@@ -269,15 +269,22 @@
                           headers={'PRIVATE-TOKEN': gltok}), context=ctx)
                   except Exception:
                       pass
+              # Heartbeat: the scaffolder task can run for several minutes. Print a
+              # progress line each poll so the Showroom SSE stream keeps flowing
+              # (idle connections get dropped by the router) and the viewer can see
+              # it is actively waiting rather than hung.
               last = ''
               for attempt in range(4):
                   branch = 'qae2e' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
                   body = json.dumps({'templateRef': 'template:default/parasol-insurance-secured-dev',
                       'values': {'branch': branch, 'owner': owner, 'owner_email': email}}).encode()
                   tid = json.loads(rcall('/api/scaffolder/v2/tasks', 'POST', body).read())['id']
+                  print('attempt %d: started scaffolder task %s (branch %s), waiting...'
+                        % (attempt, tid, branch), flush=True)
                   status = ''
-                  for _ in range(45):
+                  for i in range(45):
                       status = json.loads(rcall('/api/scaffolder/v2/tasks/' + tid).read()).get('status', '')
+                      print('  ...%ds: task status=%s' % ((i + 1) * 8, status or 'pending'), flush=True)
                       if status in ('completed', 'failed', 'cancelled'):
                           break
                       time.sleep(8)
