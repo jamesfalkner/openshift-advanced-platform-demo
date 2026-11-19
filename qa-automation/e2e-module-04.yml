@@ -13,9 +13,15 @@
 # the logged-in user's identity (user.entity.*) and the e2e calls the API with
 # a service token (no user entity), we first patch the template in GitLab so
 # user.entity.* falls back to optional owner/owner_email parameters. The patch
-# is backward compatible (real users are unaffected) and idempotent. This runs
-# the real template end-to-end, so the produced cluster state is identical to a
+# is backward compatible (real users unaffected) and idempotent. This runs the
+# real template end-to-end, so the produced cluster state is identical to a
 # developer running it as dev1.
+#
+# The scaffolder run is retried with a fresh unique branch each attempt because
+# the template re-ingest is eventually-consistent: right after the patch the
+# catalog API can report the new parameters while the scaffolder still renders a
+# stale copy (owner empty). Retrying absorbs that race; failed-attempt branches
+# are cleaned up.
 #
 # NOTE: this is a MUTATING test intended for a dedicated e2e cluster. It leaves
 # the onboarded feature environment in place (the Module 4 outcome).
@@ -39,16 +45,12 @@
     rhdh_backend_secret: backend-secret
     # GitLab root token used to patch the template repo.
     gitlab_root_secret: root-user-personal-token
-    template_repo_ref: "rhdh%2Frhdh-templates"
     template_file_path: "templates/parasol-insurance-secured/template.yaml"
     template_entity_ref: "template:default/parasol-insurance-secured-dev"
-    # The developer persona + feature the e2e onboards (hardcoded owner since we
-    # drive the scaffolder headlessly rather than as a logged-in user).
+    # The developer persona whose identity the onboarded repos are owned by
+    # (hardcoded since we drive the scaffolder headlessly, not as a logged-in user).
     m4_owner: dev1
     m4_owner_email: dev1@rhdh.com
-    m4_branch: qae2e
-    scaffolder_retries: 40
-    scaffolder_delay: 8
     e2e_failures: []
 
   tasks:
@@ -169,202 +171,221 @@
             _gl_token: "{{ r_glt.resources[0].data.token | b64decode }}"
           no_log: true
 
-        # Idempotency: the per-feature GitOps repo existing means this feature
-        # was already onboarded; skip the scaffolder and just assert the outcome.
-        - name: Check if the feature was already onboarded
+        # --- Patch the template so owner/email fall back to parameters ----
+        - name: Write the template-patch script
+          ansible.builtin.copy:
+            dest: /tmp/m4_patch_template.py
+            mode: "0700"
+            content: !unsafe |
+              import os, sys, json, ssl, urllib.request, urllib.parse
+              host = os.environ['GL_HOST']; tok = os.environ['GL_TOKEN']
+              proj = urllib.parse.quote(os.environ['TPL_REPO'], safe='')
+              path = urllib.parse.quote(os.environ['TPL_PATH'], safe='')
+              base = "https://%s/api/v4/projects/%s/repository/files/%s" % (host, proj, path)
+              ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+              def call(url, method='GET', data=None):
+                  r = urllib.request.Request(url, data=data, method=method,
+                      headers={'PRIVATE-TOKEN': tok, 'Content-Type': 'application/json'})
+                  return urllib.request.urlopen(r, context=ctx)
+              raw = call(base + "/raw?ref=main").read().decode()
+              if 'parameters.owner or user.entity' in raw:
+                  print('already-patched'); sys.exit(0)
+              anchor = '          description: Branch name in the parasol-insurance source repo'
+              add = anchor + "\n" + \
+                  '        owner:\n' \
+                  '          title: Owner (e2e only)\n' \
+                  '          type: string\n' \
+                  '          description: Overrides the logged-in user as owner (qa-automation e2e)\n' \
+                  '        owner_email:\n' \
+                  '          title: Owner email (e2e only)\n' \
+                  '          type: string\n' \
+                  '          description: Overrides the logged-in user email (qa-automation e2e)'
+              s = raw.replace(anchor, add, 1)
+              s = s.replace('${{ user.entity.metadata.name }}', '${{ parameters.owner or user.entity.metadata.name }}')
+              s = s.replace('${{ user.entity.spec.profile.email }}', '${{ parameters.owner_email or user.entity.spec.profile.email }}')
+              body = json.dumps({'branch': 'main',
+                  'commit_message': 'qa-e2e: parameterize owner/email for headless scaffolder',
+                  'content': s}).encode()
+              call(base, 'PUT', body)
+              print('patched')
+
+        - name: Patch the template so owner/email fall back to parameters
+          ansible.builtin.command: python3 /tmp/m4_patch_template.py
+          environment:
+            GL_HOST: "{{ _gl_host }}"
+            GL_TOKEN: "{{ _gl_token }}"
+            TPL_REPO: "rhdh/rhdh-templates"
+            TPL_PATH: "{{ template_file_path }}"
+          register: r_patch
+          changed_when: "'patched' in r_patch.stdout"
+          no_log: true
+
+        - name: Refresh the template entity in the RHDH catalog
           ansible.builtin.uri:
-            url: "https://{{ _gl_host }}/api/v4/projects/{{ m4_owner }}%2Fparasol-insurance-secured-{{ m4_branch }}-gitops"
+            url: "{{ _rhdh_url }}/api/catalog/refresh"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ _rhdh_token }}"
+            body_format: json
+            body:
+              entityRef: "{{ template_entity_ref }}"
+            validate_certs: false
+            status_code: [200, 201, 204]
+
+        - name: Wait until the template exposes the owner parameter
+          ansible.builtin.uri:
+            url: "{{ _rhdh_url }}/api/catalog/entities/by-name/template/default/parasol-insurance-secured-dev"
             method: GET
             headers:
-              PRIVATE-TOKEN: "{{ _gl_token }}"
+              Authorization: "Bearer {{ _rhdh_token }}"
             validate_certs: false
-            status_code: [200, 404]
-          register: r_gitops_exists
+            return_content: true
+            status_code: [200]
+          register: r_tpl_check
+          until: >-
+            '"owner"' in (r_tpl_check.content | default(''))
+          retries: 20
+          delay: 6
 
-        - name: Run the scaffolder (only if not already onboarded)
-          when: (r_gitops_exists.status | default(404)) != 200
-          block:
-            - name: Write the template-patch script
-              ansible.builtin.copy:
-                dest: /tmp/m4_patch_template.py
-                mode: "0700"
-                content: !unsafe |
-                  import os, sys, json, ssl, urllib.request, urllib.parse
-                  host = os.environ['GL_HOST']; tok = os.environ['GL_TOKEN']
-                  proj = urllib.parse.quote(os.environ['TPL_REPO'], safe='')
-                  path = urllib.parse.quote(os.environ['TPL_PATH'], safe='')
-                  base = "https://%s/api/v4/projects/%s/repository/files/%s" % (host, proj, path)
-                  ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-                  def call(url, method='GET', data=None):
-                      r = urllib.request.Request(url, data=data, method=method,
-                          headers={'PRIVATE-TOKEN': tok, 'Content-Type': 'application/json'})
-                      return urllib.request.urlopen(r, context=ctx)
-                  raw = call(base + "/raw?ref=main").read().decode()
-                  if 'parameters.owner or user.entity' in raw:
-                      print('already-patched'); sys.exit(0)
-                  anchor = '          description: Branch name in the parasol-insurance source repo'
-                  add = anchor + "\n" + \
-                      '        owner:\n' \
-                      '          title: Owner (e2e only)\n' \
-                      '          type: string\n' \
-                      '          description: Overrides the logged-in user as owner (qa-automation e2e)\n' \
-                      '        owner_email:\n' \
-                      '          title: Owner email (e2e only)\n' \
-                      '          type: string\n' \
-                      '          description: Overrides the logged-in user email (qa-automation e2e)'
-                  s = raw.replace(anchor, add, 1)
-                  s = s.replace('${{ user.entity.metadata.name }}', '${{ parameters.owner or user.entity.metadata.name }}')
-                  s = s.replace('${{ user.entity.spec.profile.email }}', '${{ parameters.owner_email or user.entity.spec.profile.email }}')
-                  body = json.dumps({'branch': 'main',
-                      'commit_message': 'qa-e2e: parameterize owner/email for headless scaffolder',
-                      'content': s}).encode()
-                  call(base, 'PUT', body)
-                  print('patched')
+        # --- Run the scaffolder (retry past the re-ingest race) -----------
+        - name: Write the scaffolder-run script
+          ansible.builtin.copy:
+            dest: /tmp/m4_run_scaffolder.py
+            mode: "0700"
+            content: !unsafe |
+              import os, sys, json, ssl, time, random, string, urllib.request
+              rhdh = os.environ['RHDH_URL']; tok = os.environ['RHDH_TOKEN']
+              owner = os.environ['OWNER']; email = os.environ['OWNER_EMAIL']
+              glhost = os.environ['GL_HOST']; gltok = os.environ['GL_TOKEN']
+              ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+              def rcall(path, method='GET', data=None):
+                  r = urllib.request.Request(rhdh + path, data=data, method=method,
+                      headers={'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json'})
+                  return urllib.request.urlopen(r, context=ctx)
+              def del_branch(b):
+                  try:
+                      u = "https://%s/api/v4/projects/parasol%%2Fparasol-insurance/repository/branches/%s" % (glhost, b)
+                      urllib.request.urlopen(urllib.request.Request(u, method='DELETE',
+                          headers={'PRIVATE-TOKEN': gltok}), context=ctx)
+                  except Exception:
+                      pass
+              last = ''
+              for attempt in range(4):
+                  branch = 'qae2e' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=5))
+                  body = json.dumps({'templateRef': 'template:default/parasol-insurance-secured-dev',
+                      'values': {'branch': branch, 'owner': owner, 'owner_email': email}}).encode()
+                  tid = json.loads(rcall('/api/scaffolder/v2/tasks', 'POST', body).read())['id']
+                  status = ''
+                  for _ in range(45):
+                      status = json.loads(rcall('/api/scaffolder/v2/tasks/' + tid).read()).get('status', '')
+                      if status in ('completed', 'failed', 'cancelled'):
+                          break
+                      time.sleep(8)
+                  if status == 'completed':
+                      print(branch); sys.exit(0)
+                  del_branch(branch)
+                  last = 'attempt %d branch %s status=%s' % (attempt, branch, status)
+                  sys.stderr.write(last + '\n')
+                  time.sleep(25)
+              sys.stderr.write('scaffolder never completed: ' + last + '\n'); sys.exit(1)
 
-            - name: Patch the template so owner/email fall back to parameters
-              ansible.builtin.command: python3 /tmp/m4_patch_template.py
-              environment:
-                GL_HOST: "{{ _gl_host }}"
-                GL_TOKEN: "{{ _gl_token }}"
-                TPL_REPO: "rhdh/rhdh-templates"
-                TPL_PATH: "{{ template_file_path }}"
-              register: r_patch
-              changed_when: "'patched' in r_patch.stdout"
-              no_log: true
+        - name: Run the onboarding template (self-service scaffolder)
+          ansible.builtin.command: python3 /tmp/m4_run_scaffolder.py
+          environment:
+            RHDH_URL: "{{ _rhdh_url }}"
+            RHDH_TOKEN: "{{ _rhdh_token }}"
+            OWNER: "{{ m4_owner }}"
+            OWNER_EMAIL: "{{ m4_owner_email }}"
+            GL_HOST: "{{ _gl_host }}"
+            GL_TOKEN: "{{ _gl_token }}"
+          register: r_scaffold
+          changed_when: true
+          failed_when: false
+          no_log: true
 
-            - name: Refresh the template entity in the RHDH catalog
-              ansible.builtin.uri:
-                url: "{{ _rhdh_url }}/api/catalog/refresh"
-                method: POST
-                headers:
-                  Authorization: "Bearer {{ _rhdh_token }}"
-                body_format: json
-                body:
-                  entityRef: "{{ template_entity_ref }}"
-                validate_certs: false
-                status_code: [200, 201, 204]
+        - name: Record onboarding scaffolder failed
+          ansible.builtin.set_fact:
+            e2e_failures: "{{ e2e_failures + ['Onboarding scaffolder did not complete after retries'] }}"
+          when: (r_scaffold.rc | default(1)) != 0
 
-            - name: Wait until the template exposes the owner parameter
-              ansible.builtin.uri:
-                url: "{{ _rhdh_url }}/api/catalog/entities/by-name/template/default/parasol-insurance-secured-dev"
-                method: GET
-                headers:
-                  Authorization: "Bearer {{ _rhdh_token }}"
-                validate_certs: false
-                return_content: true
-                status_code: [200]
-              register: r_tpl_check
-              until: >-
-                '"owner"' in (r_tpl_check.content | default(''))
-              retries: 20
-              delay: 6
-
-            - name: Invoke the scaffolder (run the onboarding template)
-              ansible.builtin.uri:
-                url: "{{ _rhdh_url }}/api/scaffolder/v2/tasks"
-                method: POST
-                headers:
-                  Authorization: "Bearer {{ _rhdh_token }}"
-                body_format: json
-                body:
-                  templateRef: "{{ template_entity_ref }}"
-                  values:
-                    branch: "{{ m4_branch }}"
-                    owner: "{{ m4_owner }}"
-                    owner_email: "{{ m4_owner_email }}"
-                validate_certs: false
-                status_code: [200, 201]
-              register: r_task
-
-            - name: Wait for the scaffolder task to finish
-              ansible.builtin.uri:
-                url: "{{ _rhdh_url }}/api/scaffolder/v2/tasks/{{ r_task.json.id }}"
-                method: GET
-                headers:
-                  Authorization: "Bearer {{ _rhdh_token }}"
-                validate_certs: false
-                status_code: [200]
-              register: r_task_status
-              until: (r_task_status.json.status | default('')) in ['completed', 'failed', 'cancelled']
-              retries: "{{ scaffolder_retries }}"
-              delay: "{{ scaffolder_delay }}"
-
-            - name: Record scaffolder task did not complete
-              ansible.builtin.set_fact:
-                e2e_failures: >-
-                  {{ e2e_failures + ['Onboarding template task ended with status=' +
-                     (r_task_status.json.status | default('unknown'))] }}
-              when: (r_task_status.json.status | default('')) != 'completed'
+        - name: Set the onboarded feature branch
+          ansible.builtin.set_fact:
+            _m4_feature_branch: "{{ r_scaffold.stdout_lines[-1] }}"
+          when: (r_scaffold.rc | default(1)) == 0
 
         # --- Assert the Module 4 outcome artifacts exist -----------------
-        - name: Assert the feature branch exists on parasol-insurance
-          ansible.builtin.uri:
-            url: "https://{{ _gl_host }}/api/v4/projects/parasol%2Fparasol-insurance/repository/branches/{{ m4_branch }}"
-            method: GET
-            headers:
-              PRIVATE-TOKEN: "{{ _gl_token }}"
-            validate_certs: false
-            status_code: [200, 404]
-          register: r_branch_out
-          until: (r_branch_out.status | default(404)) == 200
-          retries: 10
-          delay: 6
-          ignore_errors: true
+        - name: Assert the Module 4 artifacts
+          when: _m4_feature_branch is defined
+          block:
+            - name: Assert the feature branch exists on parasol-insurance
+              ansible.builtin.uri:
+                url: "https://{{ _gl_host }}/api/v4/projects/parasol%2Fparasol-insurance/repository/branches/{{ _m4_feature_branch }}"
+                method: GET
+                headers:
+                  PRIVATE-TOKEN: "{{ _gl_token }}"
+                validate_certs: false
+                status_code: [200, 404]
+              register: r_branch_out
+              until: (r_branch_out.status | default(404)) == 200
+              retries: 10
+              delay: 6
+              ignore_errors: true
 
-        - name: Record feature branch missing
-          ansible.builtin.set_fact:
-            e2e_failures: "{{ e2e_failures + ['Feature branch ' + m4_branch + ' was not created on parasol-insurance'] }}"
-          when: (r_branch_out.status | default(404)) != 200
+            - name: Record feature branch missing
+              ansible.builtin.set_fact:
+                e2e_failures: "{{ e2e_failures + ['Feature branch ' + _m4_feature_branch + ' was not created on parasol-insurance'] }}"
+              when: (r_branch_out.status | default(404)) != 200
 
-        - name: Assert the per-feature GitOps repo exists
-          ansible.builtin.uri:
-            url: "https://{{ _gl_host }}/api/v4/projects/{{ m4_owner }}%2Fparasol-insurance-secured-{{ m4_branch }}-gitops"
-            method: GET
-            headers:
-              PRIVATE-TOKEN: "{{ _gl_token }}"
-            validate_certs: false
-            status_code: [200, 404]
-          register: r_gitops_out
-          until: (r_gitops_out.status | default(404)) == 200
-          retries: 10
-          delay: 6
-          ignore_errors: true
+            - name: Assert the per-feature GitOps repo exists
+              ansible.builtin.uri:
+                url: "https://{{ _gl_host }}/api/v4/projects/{{ m4_owner }}%2Fparasol-insurance-secured-{{ _m4_feature_branch }}-gitops"
+                method: GET
+                headers:
+                  PRIVATE-TOKEN: "{{ _gl_token }}"
+                validate_certs: false
+                status_code: [200, 404]
+              register: r_gitops_out
+              until: (r_gitops_out.status | default(404)) == 200
+              retries: 10
+              delay: 6
+              ignore_errors: true
 
-        - name: Record GitOps repo missing
-          ansible.builtin.set_fact:
-            e2e_failures: >-
-              {{ e2e_failures + ['GitOps repo ' + m4_owner + '/parasol-insurance-secured-' +
-                 m4_branch + '-gitops was not created'] }}
-          when: (r_gitops_out.status | default(404)) != 200
+            - name: Record GitOps repo missing
+              ansible.builtin.set_fact:
+                e2e_failures: >-
+                  {{ e2e_failures + ['GitOps repo ' + m4_owner + '/parasol-insurance-secured-' +
+                     _m4_feature_branch + '-gitops was not created'] }}
+              when: (r_gitops_out.status | default(404)) != 200
 
-        - name: Assert the Argo CD bootstrap application was created
-          kubernetes.core.k8s_info:
-            host: "{{ _k8s_host | default(omit, true) }}"
-            api_key: "{{ _k8s_api_key | default(omit, true) }}"
-            validate_certs: "{{ _k8s_validate_certs }}"
-            api_version: argoproj.io/v1alpha1
-            kind: Application
-            namespace: "{{ ns_argocd }}"
-            name: "parasol-insurance-secured-{{ m4_owner }}-{{ m4_branch }}-bootstrap"
-          register: r_argo_boot
-          until: r_argo_boot.resources | default([]) | length > 0
-          retries: 10
-          delay: 6
-          ignore_errors: true
+            - name: Assert the Argo CD bootstrap application was created
+              kubernetes.core.k8s_info:
+                host: "{{ _k8s_host | default(omit, true) }}"
+                api_key: "{{ _k8s_api_key | default(omit, true) }}"
+                validate_certs: "{{ _k8s_validate_certs }}"
+                api_version: argoproj.io/v1alpha1
+                kind: Application
+                namespace: "{{ ns_argocd }}"
+                name: "parasol-insurance-secured-{{ m4_owner }}-{{ _m4_feature_branch }}-bootstrap"
+              register: r_argo_boot
+              until: r_argo_boot.resources | default([]) | length > 0
+              retries: 10
+              delay: 6
+              ignore_errors: true
 
-        - name: Record Argo CD bootstrap application missing
-          ansible.builtin.set_fact:
-            e2e_failures: >-
-              {{ e2e_failures + ['Argo CD app parasol-insurance-secured-' + m4_owner + '-' +
-                 m4_branch + '-bootstrap was not created'] }}
-          when: r_argo_boot.resources | default([]) | length == 0
+            - name: Record Argo CD bootstrap application missing
+              ansible.builtin.set_fact:
+                e2e_failures: >-
+                  {{ e2e_failures + ['Argo CD app parasol-insurance-secured-' + m4_owner + '-' +
+                     _m4_feature_branch + '-bootstrap was not created'] }}
+              when: r_argo_boot.resources | default([]) | length == 0
 
     # --- Summary --------------------------------------------------------
     - name: "Module 04 — PASSED"
       ansible.builtin.debug:
         msg: >-
           Developer Hub outcome verified: onboarding template provisioned the
-          feature branch, GitOps repo, and Argo CD application for '{{ m4_branch }}'.
+          feature branch, GitOps repo, and Argo CD application for
+          '{{ _m4_feature_branch | default('?') }}'.
       when: e2e_failures | length == 0
 
     - name: "Module 04 — FAILED"
