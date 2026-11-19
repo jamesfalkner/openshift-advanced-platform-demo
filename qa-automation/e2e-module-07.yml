@@ -210,7 +210,7 @@
       block:
         - name: Check if the LLM classifier is already on main
           ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ 'src/main/java/com/parasol/EmailClassifier.java' | urlencode }}?ref=main"
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ 'src/main/java/com/parasol/EmailClassifier.java' | regex_replace('/', '%2F') }}?ref=main"
             method: GET
             headers:
               Authorization: "Bearer {{ _gitlab_token }}"

@@ -139,7 +139,7 @@
 
     - name: Check if stats file already exists on main
       ansible.builtin.uri:
-        url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ stats_file_path | urlencode }}?ref=main"
+        url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ stats_file_path | regex_replace('/', '%2F') }}?ref=main"
         method: GET
         headers:
           Authorization: "Bearer {{ _gitlab_token }}"
