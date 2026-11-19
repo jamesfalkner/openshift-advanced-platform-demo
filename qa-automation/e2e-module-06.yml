@@ -27,6 +27,10 @@
     qa_persona: pe1
     qa_persona_password: "{{ common_password | default('openshift') }}"
     ns_tpa: trusted-profile-analyzer
+    # The SBOM the user browses in TPA is the one the secured tag-promote
+    # pipeline (Module 5) uploads. We assert at least one SBOM whose name
+    # matches this is present.
+    tpa_sbom_match: parasol
     e2e_failures: []
 
   tasks:
@@ -100,25 +104,71 @@
         - r_tpa_http is defined
         - r_tpa_http is failed
 
-    # --- TPA SBOM API serves data ----------------------------------------
-    - name: Query TPA SBOM API
-      ansible.builtin.uri:
-        url: "https://{{ _tpa_host }}/api/v2/sbom?limit=1"
-        method: GET
-        validate_certs: false
-        status_code: [200, 401, 403]
-        timeout: 30
-      register: r_tpa_sbom
+    # --- Outcome: TPA actually holds the parasol SBOM --------------------
+    # The current M06 "does /api/v2/sbom answer" check passes even with zero
+    # SBOMs. The real Module 6 outcome is that the SBOM the secured pipeline
+    # built and uploaded is browsable in TPA. We authenticate with the in-
+    # cluster tpa-cli service-account client and assert a parasol SBOM exists.
+    - name: Authenticate to TPA and assert a parasol SBOM is present
       when: _tpa_host | default('') | length > 0
-      ignore_errors: true
+      block:
+        - name: Read tpa-cli OIDC client secret
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: v1
+            kind: Secret
+            namespace: "{{ ns_tpa }}"
+            name: oidc-tpa-cli
+          register: r_tpa_cli_secret
+          no_log: true
 
-    - name: Record TPA SBOM API not reachable
+        - name: Derive the Keycloak issuer from the TPA route domain
+          ansible.builtin.set_fact:
+            # server-xxx.apps.<domain>  ->  https://sso.apps.<domain>/realms/backstage
+            _tpa_issuer: "https://sso.{{ _tpa_host.split('.', 1)[1] }}/realms/backstage"
+            _tpa_client_secret: "{{ r_tpa_cli_secret.resources[0].data['client-secret'] | b64decode }}"
+          no_log: true
+
+        - name: Mint a TPA token (tpa-cli client_credentials)
+          ansible.builtin.uri:
+            url: "{{ _tpa_issuer }}/protocol/openid-connect/token"
+            method: POST
+            body_format: form-urlencoded
+            body:
+              grant_type: client_credentials
+              client_id: tpa-cli
+              client_secret: "{{ _tpa_client_secret }}"
+            validate_certs: false
+            status_code: [200]
+          register: r_tpa_token
+          no_log: true
+
+        - name: Query TPA for the parasol SBOM
+          ansible.builtin.uri:
+            url: "https://{{ _tpa_host }}/api/v2/sbom?q={{ tpa_sbom_match }}&limit=10"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ r_tpa_token.json.access_token }}"
+            validate_certs: false
+            status_code: [200]
+            timeout: 30
+          register: r_tpa_sbom
+
+        - name: Record no parasol SBOM in TPA
+          ansible.builtin.set_fact:
+            e2e_failures: >-
+              {{ e2e_failures + ['No SBOM matching "' + tpa_sbom_match +
+                 '" found in TPA — the secured tag-promote pipeline (Module 5) has not uploaded one'] }}
+          when: (r_tpa_sbom.json.total | default(0) | int) == 0
+
+    - name: Record TPA auth/query failed
       ansible.builtin.set_fact:
-        e2e_failures: "{{ e2e_failures + ['TPA SBOM API (/api/v2/sbom) did not respond'] }}"
+        e2e_failures: "{{ e2e_failures + ['Could not authenticate to TPA or query the SBOM API'] }}"
       when:
         - _tpa_host | default('') | length > 0
-        - r_tpa_sbom is defined
-        - r_tpa_sbom is failed
+        - (r_tpa_token is defined and r_tpa_token is failed) or (r_tpa_sbom is defined and r_tpa_sbom is failed)
 
     # --- Summary --------------------------------------------------------
     - name: "Module 06 — PASSED"
