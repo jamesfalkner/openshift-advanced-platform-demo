@@ -198,70 +198,85 @@
       when: _gitlab_url is not defined or (r_oauth is defined and r_oauth is failed)
 
     # =====================================================================
-    # Outcome (mutating only): deploy the AI code and verify the inbox
+    # Outcome: deploy the AI code and verify the inbox has no "Review
+    # Required" left. Idempotent — if the LLM code is already on main (a
+    # previous run merged it), we skip the merge and assert the inbox
+    # directly, so the end state always matches the Module 7 outcome.
     # =====================================================================
     - name: Drive the AI outcome and assert inbox
       when:
-        - qa_run_mutating | bool
         - _project_id is defined
         - (r_branch.status | default(0)) == 200
       block:
-        - name: Create MR llm-classification -> main
+        - name: Check if the LLM classifier is already on main
           ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests"
-            method: POST
-            headers:
-              Authorization: "Bearer {{ _gitlab_token }}"
-            body_format: json
-            body:
-              source_branch: "{{ llm_branch }}"
-              target_branch: main
-              title: "qa-e2e: enable LLM email routing"
-            validate_certs: false
-            status_code: [201, 409]
-          register: r_mr
-
-        - name: Resolve open MR iid
-          ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests?state=opened&source_branch={{ llm_branch }}"
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/repository/files/{{ 'src/main/java/com/parasol/EmailClassifier.java' | urlencode }}?ref=main"
             method: GET
             headers:
               Authorization: "Bearer {{ _gitlab_token }}"
             validate_certs: false
-            status_code: [200]
-          register: r_mr_list
+            status_code: [200, 404]
+          register: r_llm_on_main
 
-        - name: Record no mergeable MR
-          ansible.builtin.set_fact:
-            e2e_failures: "{{ e2e_failures + ['Could not open an MR from ' + llm_branch + ' to main'] }}"
-          when: r_mr_list.json | default([]) | length == 0
+        - name: Enable LLM routing (merge llm-classification -> main)
+          when: (r_llm_on_main.status | default(404)) != 200
+          block:
+            - name: Create MR llm-classification -> main
+              ansible.builtin.uri:
+                url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests"
+                method: POST
+                headers:
+                  Authorization: "Bearer {{ _gitlab_token }}"
+                body_format: json
+                body:
+                  source_branch: "{{ llm_branch }}"
+                  target_branch: main
+                  title: "qa-e2e: enable LLM email routing"
+                validate_certs: false
+                status_code: [201, 409]
+              register: r_mr
 
-        # The platform engineer (pe1) approves/merges the MR — mint a pe1 token.
-        - name: Mint GitLab API token as the platform engineer ({{ gitlab_pe_user }})
-          ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/oauth/token"
-            method: POST
-            body_format: json
-            body:
-              grant_type: password
-              username: "{{ gitlab_pe_user }}"
-              password: "{{ common_password }}"
-            validate_certs: false
-            status_code: [200]
-          register: r_pe_oauth
-          no_log: true
-          when: r_mr_list.json | default([]) | length > 0
+            - name: Resolve open MR iid
+              ansible.builtin.uri:
+                url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests?state=opened&source_branch={{ llm_branch }}"
+                method: GET
+                headers:
+                  Authorization: "Bearer {{ _gitlab_token }}"
+                validate_certs: false
+                status_code: [200]
+              register: r_mr_list
 
-        - name: Merge the MR as the platform engineer
-          ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ r_mr_list.json[0].iid }}/merge"
-            method: PUT
-            headers:
-              Authorization: "Bearer {{ r_pe_oauth.json.access_token }}"
-            validate_certs: false
-            status_code: [200, 405, 406]
-          register: r_merge
-          when: r_mr_list.json | default([]) | length > 0
+            - name: Record no mergeable MR
+              ansible.builtin.set_fact:
+                e2e_failures: "{{ e2e_failures + ['Could not open an MR from ' + llm_branch + ' to main'] }}"
+              when: r_mr_list.json | default([]) | length == 0
+
+            # The platform engineer (pe1) approves/merges the MR — mint a pe1 token.
+            - name: Mint GitLab API token as the platform engineer ({{ gitlab_pe_user }})
+              ansible.builtin.uri:
+                url: "{{ _gitlab_url }}/oauth/token"
+                method: POST
+                body_format: json
+                body:
+                  grant_type: password
+                  username: "{{ gitlab_pe_user }}"
+                  password: "{{ common_password }}"
+                validate_certs: false
+                status_code: [200]
+              register: r_pe_oauth
+              no_log: true
+              when: r_mr_list.json | default([]) | length > 0
+
+            - name: Merge the MR as the platform engineer
+              ansible.builtin.uri:
+                url: "{{ _gitlab_url }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ r_mr_list.json[0].iid }}/merge"
+                method: PUT
+                headers:
+                  Authorization: "Bearer {{ r_pe_oauth.json.access_token }}"
+                validate_certs: false
+                status_code: [200, 405, 406]
+              register: r_merge
+              when: r_mr_list.json | default([]) | length > 0
 
         - name: Wait for Argo CD dev app Synced + Healthy after merge
           kubernetes.core.k8s_info:
@@ -279,7 +294,8 @@
             - (r_argo.resources[0].status.health.status | default('')) == 'Healthy'
           retries: 90
           delay: 10
-          when: r_mr_list.json | default([]) | length > 0
+          # Only wait for a fresh sync if we actually merged this run.
+          when: (r_llm_on_main.status | default(404)) != 200
 
         - name: Find Parasol dev route
           kubernetes.core.k8s_info:
@@ -321,13 +337,6 @@
             - r_inbox is defined
             - (r_inbox.status | default(0)) != 200
               or review_required_label in (r_inbox.content | default('') | lower)
-
-    - name: Note (non-mutating mode)
-      ansible.builtin.debug:
-        msg: >-
-          qa_run_mutating is false — verified AI prerequisites only.
-          Set -e qa_run_mutating=true to deploy the LLM code and assert the inbox outcome.
-      when: not (qa_run_mutating | bool)
 
     # --- Summary --------------------------------------------------------
     - name: "Module 07 — PASSED"
