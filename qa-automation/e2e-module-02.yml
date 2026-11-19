@@ -281,12 +281,11 @@
     - name: Report which task failed in Phase 1
       ansible.builtin.debug:
         msg: >-
-          Phase-1 failed task(s):
+          Phase-1 failed TaskRun(s):
           {{ r_pr1_tasks.resources
              | selectattr('status.conditions', 'defined')
              | selectattr('status.conditions.0.status', 'equalto', 'False')
-             | map(attribute='metadata.labels')
-             | map(attribute='tekton.dev/pipelineTask') | list }}
+             | map(attribute='metadata.name') | list }}
 
     # =====================================================================
     # PHASE 2 (Module 2 Part 2-3): the developer fixes the code smells
