@@ -7,11 +7,16 @@
 #   - The secure build namespace + secure pipeline infrastructure exist.
 #   - Advanced Cluster Security (ACS/StackRox) Central is deployed and reachable.
 #   - Trusted Artifact Signer (RHTAS/securesign) is Ready (signing + Rekor).
-#   - The most recent secured PipelineRun (if any) succeeded — i.e. ACS scan,
-#     Syft SBOM, TAS signing and Conforma gate pass.
+#   - OUTCOME: the platform engineer creates a release tag, which triggers the
+#     secured tag-promote pipeline. We create the tag and assert that run
+#     SUCCEEDS — which means ACS scan + policy check, Syft SBOM generation,
+#     upload-to-TPA, Tekton Chains signing, and the Conforma gate all passed,
+#     and production promotion was triggered. (The SBOM this produces is what
+#     Module 6 then verifies in TPA.)
 #
-# The Dependency Analytics popup and per-task log reading are visual; the backing
-# fact is the secured pipeline/operators being healthy and a run succeeding.
+# This is a MUTATING test: it creates a git tag and promotes to production,
+# leaving the cluster in the post-Module-5 state. The Dependency Analytics
+# popup and per-task log reading are visual and intentionally not automated.
 # =============================================================================
 
 - name: "E2E Module 05: Secure development workflow"
@@ -28,9 +33,19 @@
     # ConfigMap). Override with -e qa_persona=dev1 if a module needs the developer.
     qa_persona: pe1
     qa_persona_password: "{{ common_password | default('openshift') }}"
+    common_password: openshift
     ns_build_secured: parasol-insurance-secured-build
     ns_acs: stackrox
     ns_tas: trusted-artifact-signer
+    # Module 5 outcome: the platform engineer creates a release tag, which
+    # triggers the secured tag-promote pipeline (ACS scan, Syft SBOM, upload to
+    # TPA, Tekton Chains signing, Conforma validation) and promotes to prod.
+    # The e2e mints a GitLab token as the PE persona and creates the tag.
+    gitlab_pe_user: pe1
+    gitlab_project_ref: "parasol%2Fparasol-insurance"
+    tag_promote_pipeline: parasol-insurance-secured-tag-promote
+    tag_promote_retries: 60
+    tag_promote_delay: 10
     e2e_failures: []
 
   tasks:
@@ -96,28 +111,128 @@
         - r_secured_ns.resources | default([]) | length > 0
         - r_secured_pipelines.resources | default([]) | length == 0
 
-    # --- Latest secured PipelineRun succeeded (if any have run) ----------
-    - name: Get secured PipelineRuns
-      kubernetes.core.k8s_info:
-        host: "{{ _k8s_host | default(omit, true) }}"
-        api_key: "{{ _k8s_api_key | default(omit, true) }}"
-        validate_certs: "{{ _k8s_validate_certs }}"
-        api_version: tekton.dev/v1
-        kind: PipelineRun
-        namespace: "{{ ns_build_secured }}"
-      register: r_secured_prs
+    # --- Outcome: PE tags a release -> secured tag-promote pipeline runs --
+    # This is the Module 5 Part 2 outcome: the platform engineer creates a
+    # release tag, which triggers the secured tag-promote pipeline. That run
+    # performs the ACS scan, generates the Syft SBOM, uploads it to TPA, signs
+    # via Tekton Chains, and gates on Conforma. We create the tag and assert
+    # the resulting tag-promote run SUCCEEDS with those security tasks.
+    - name: Drive the release-tag outcome
       when: r_secured_ns.resources | default([]) | length > 0
-      ignore_errors: true
+      block:
+        - name: Get GitLab route
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: route.openshift.io/v1
+            kind: Route
+            namespace: gitlab
+            name: gitlab
+          register: r_gitlab_route
 
-    - name: Record latest secured PipelineRun not successful
-      ansible.builtin.set_fact:
-        e2e_failures: "{{ e2e_failures + ['Latest secured PipelineRun did not succeed'] }}"
-      when:
-        - r_secured_prs.resources | default([]) | length > 0
-        - >-
-          (r_secured_prs.resources | sort(attribute='metadata.creationTimestamp') | last).status.conditions
-          | default([]) | selectattr('type', 'equalto', 'Succeeded')
-          | selectattr('status', 'equalto', 'True') | list | length == 0
+        - name: Set GitLab URL
+          ansible.builtin.set_fact:
+            _gitlab_url: "https://{{ r_gitlab_route.resources[0].spec.host }}"
+
+        - name: Mint GitLab API token as the platform engineer ({{ gitlab_pe_user }})
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/oauth/token"
+            method: POST
+            body_format: json
+            body:
+              grant_type: password
+              username: "{{ gitlab_pe_user }}"
+              password: "{{ common_password }}"
+            validate_certs: false
+            status_code: [200]
+          register: r_pe_oauth
+          no_log: true
+
+        - name: Set GitLab token
+          ansible.builtin.set_fact:
+            _gitlab_token: "{{ r_pe_oauth.json.access_token }}"
+          no_log: true
+
+        - name: Generate a unique release tag name
+          ansible.builtin.command: date -u +%Y%m%d-%H%M%S
+          register: r_tagts
+          changed_when: false
+
+        - name: Set release tag
+          ansible.builtin.set_fact:
+            _release_tag: "qa-e2e-{{ r_tagts.stdout }}"
+
+        - name: Record tag-promote start timestamp
+          ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+          register: r_now
+          changed_when: false
+
+        - name: Create the release tag (PE promotes to production)
+          ansible.builtin.uri:
+            url: "{{ _gitlab_url }}/api/v4/projects/{{ gitlab_project_ref }}/repository/tags"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ _gitlab_token }}"
+            body_format: json
+            body:
+              tag_name: "{{ _release_tag }}"
+              ref: main
+            validate_certs: false
+            status_code: [201]
+
+        - name: Wait for the tag-promote PipelineRun to appear
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: "{{ ns_build_secured }}"
+            label_selectors:
+              - "tekton.dev/pipeline={{ tag_promote_pipeline }}"
+          register: r_tp_prs
+          until: >-
+            r_tp_prs.resources | selectattr('metadata.creationTimestamp', 'ge', r_now.stdout)
+            | list | length > 0
+          retries: 20
+          delay: 10
+
+        - name: Select the triggered tag-promote PipelineRun
+          ansible.builtin.set_fact:
+            _tp_name: >-
+              {{ (r_tp_prs.resources | selectattr('metadata.creationTimestamp', 'ge', r_now.stdout)
+                  | sort(attribute='metadata.creationTimestamp') | last).metadata.name }}
+
+        - name: Wait for the tag-promote PipelineRun to SUCCEED
+          kubernetes.core.k8s_info:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            api_version: tekton.dev/v1
+            kind: PipelineRun
+            namespace: "{{ ns_build_secured }}"
+            name: "{{ _tp_name }}"
+          register: r_tp_status
+          until:
+            - r_tp_status.resources[0].status.conditions is defined
+            - >-
+              r_tp_status.resources[0].status.conditions
+              | selectattr('type', 'equalto', 'Succeeded')
+              | selectattr('status', 'equalto', 'True') | list | length > 0
+          retries: "{{ tag_promote_retries }}"
+          delay: "{{ tag_promote_delay }}"
+          ignore_errors: true
+
+        - name: Record tag-promote pipeline did not succeed
+          ansible.builtin.set_fact:
+            e2e_failures: >-
+              {{ e2e_failures + ['Secured tag-promote pipeline ' + (_tp_name | default('?')) +
+                 ' did not succeed (runs ACS scan, Syft SBOM, upload-to-TPA, Tekton Chains signing, Conforma)'] }}
+          when: >-
+            (r_tp_status.resources[0].status.conditions | default([])
+             | selectattr('type', 'equalto', 'Succeeded')
+             | selectattr('status', 'equalto', 'True') | list | length == 0)
 
     # --- ACS Central deployed + reachable --------------------------------
     - name: Get ACS Central route
