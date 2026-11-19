@@ -47,7 +47,7 @@
     ns_dev: parasol-insurance-dev
     argocd_ns: rhdh-gitops
     argocd_app_dev: parasol-insurance-dev
-    inbox_path: "/api/emails"
+    inbox_path: "/api/inbox"
     review_required_label: "review required"
     # External LiteLLM endpoint (optional; from user_data or -e)
     litellm_api_base_url: ""
