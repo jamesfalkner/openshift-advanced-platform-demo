@@ -28,6 +28,10 @@
     qa_persona: pe1
     qa_persona_password: "{{ common_password | default('openshift') }}"
     ns_dev: parasol-insurance-dev
+    # The demo configures the HPA (parasol-insurance-hpa) on the PRODUCTION
+    # deployment via GitOps (see Module 3 Part 3), so autoscaling is asserted in
+    # the prod namespace, not dev.
+    ns_prod: parasol-insurance-prod
     e2e_failures: []
 
   tasks:
@@ -108,21 +112,21 @@
         r_kiali_route.resources | default([]) | length == 0
         or (r_kiali_http is defined and r_kiali_http is failed)
 
-    # --- Autoscaling: HPA present for the Parasol app --------------------
-    - name: Get HPAs in dev namespace
+    # --- Autoscaling: HPA present for the Parasol app (prod deployment) --
+    - name: Get HPAs in prod namespace
       kubernetes.core.k8s_info:
         host: "{{ _k8s_host | default(omit, true) }}"
         api_key: "{{ _k8s_api_key | default(omit, true) }}"
         validate_certs: "{{ _k8s_validate_certs }}"
         api_version: autoscaling/v2
         kind: HorizontalPodAutoscaler
-        namespace: "{{ ns_dev }}"
+        namespace: "{{ ns_prod }}"
       register: r_hpa
       ignore_errors: true
 
     - name: Record no HPA configured
       ansible.builtin.set_fact:
-        e2e_failures: "{{ e2e_failures + ['No HorizontalPodAutoscaler found in ' + ns_dev] }}"
+        e2e_failures: "{{ e2e_failures + ['No HorizontalPodAutoscaler found in ' + ns_prod] }}"
       when: r_hpa.resources | default([]) | length == 0
 
     # --- External secrets reconciled ------------------------------------
