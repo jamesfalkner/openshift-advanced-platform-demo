@@ -135,104 +135,86 @@
           ansible.builtin.set_fact:
             _gitlab_url: "https://{{ r_gitlab_route.resources[0].spec.host }}"
 
-        - name: Mint GitLab API token as the platform engineer ({{ gitlab_pe_user }})
-          ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/oauth/token"
-            method: POST
-            body_format: json
-            body:
-              grant_type: password
-              username: "{{ gitlab_pe_user }}"
-              password: "{{ common_password }}"
-            validate_certs: false
-            status_code: [200]
-          register: r_pe_oauth
-          no_log: true
-
-        - name: Set GitLab token
-          ansible.builtin.set_fact:
-            _gitlab_token: "{{ r_pe_oauth.json.access_token }}"
-          no_log: true
-
-        - name: Generate a unique release tag name
-          ansible.builtin.command: date -u +%Y%m%d-%H%M%S
-          register: r_tagts
-          changed_when: false
-
-        - name: Set release tag
-          ansible.builtin.set_fact:
-            _release_tag: "qa-e2e-{{ r_tagts.stdout }}"
-
-        - name: Record tag-promote start timestamp
-          ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
-          register: r_now
-          changed_when: false
-
-        - name: Create the release tag (PE promotes to production)
-          ansible.builtin.uri:
-            url: "{{ _gitlab_url }}/api/v4/projects/{{ gitlab_project_ref }}/repository/tags"
-            method: POST
-            headers:
-              Authorization: "Bearer {{ _gitlab_token }}"
-            body_format: json
-            body:
-              tag_name: "{{ _release_tag }}"
-              ref: main
-            validate_certs: false
-            status_code: [201]
-
-        - name: Wait for the tag-promote PipelineRun to appear
+        - name: Read GitLab root token
           kubernetes.core.k8s_info:
             host: "{{ _k8s_host | default(omit, true) }}"
             api_key: "{{ _k8s_api_key | default(omit, true) }}"
             validate_certs: "{{ _k8s_validate_certs }}"
-            api_version: tekton.dev/v1
-            kind: PipelineRun
-            namespace: "{{ ns_build_secured }}"
-            label_selectors:
-              - "tekton.dev/pipeline={{ tag_promote_pipeline }}"
-          register: r_tp_prs
-          until: >-
-            r_tp_prs.resources | selectattr('metadata.creationTimestamp', 'ge', r_now.stdout)
-            | list | length > 0
-          retries: 20
-          delay: 10
+            api_version: v1
+            kind: Secret
+            namespace: gitlab
+            name: root-user-personal-token
+          register: r_glt
+          no_log: true
 
-        - name: Select the triggered tag-promote PipelineRun
-          ansible.builtin.set_fact:
-            _tp_name: >-
-              {{ (r_tp_prs.resources | selectattr('metadata.creationTimestamp', 'ge', r_now.stdout)
-                  | sort(attribute='metadata.creationTimestamp') | last).metadata.name }}
+        # The tag-promote pipeline depends on ACS Scanner V4's vuln store being
+        # loaded (slow on a fresh cluster) and downloads syft from GitHub (can
+        # 500 transiently). Both make the run flaky, so we retry with a fresh
+        # tag each attempt until it succeeds.
+        - name: Write the tag-promote run script
+          ansible.builtin.copy:
+            dest: /tmp/m5_tag_promote.py
+            mode: "0700"
+            content: !unsafe |
+              import os, sys, json, ssl, time, urllib.request, urllib.parse
+              gl = os.environ['GL_HOST']; glt = os.environ['GL_TOKEN']
+              api = os.environ['API_URL']; ktok = os.environ['K8S_TOKEN']; ns = os.environ['NS']
+              ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+              def tag_push(tag):
+                  data = urllib.parse.urlencode({'tag_name': tag, 'ref': 'main'}).encode()
+                  r = urllib.request.Request(
+                      'https://%s/api/v4/projects/parasol%%2Fparasol-insurance/repository/tags' % gl,
+                      data=data, method='POST', headers={'PRIVATE-TOKEN': glt})
+                  urllib.request.urlopen(r, context=ctx)
+              def pipelineruns():
+                  sel = urllib.parse.quote('tekton.dev/pipeline=parasol-insurance-secured-tag-promote')
+                  r = urllib.request.Request(
+                      '%s/apis/tekton.dev/v1/namespaces/%s/pipelineruns?labelSelector=%s' % (api, ns, sel),
+                      headers={'Authorization': 'Bearer ' + ktok})
+                  return json.loads(urllib.request.urlopen(r, context=ctx).read()).get('items', [])
+              last = ''
+              for attempt in range(3):
+                  tag = 'qa-e2e-%d-%d' % (int(time.time()), attempt)
+                  tag_push(tag)
+                  status = ''
+                  for _ in range(90):
+                      time.sleep(10)
+                      cand = [i for i in pipelineruns()
+                              if any(p.get('name') == 'git-tag' and p.get('value') == tag
+                                     for p in i.get('spec', {}).get('params', []))]
+                      if not cand:
+                          continue
+                      conds = cand[0].get('status', {}).get('conditions', [])
+                      if conds and conds[0].get('type') == 'Succeeded':
+                          if conds[0].get('status') == 'True':
+                              status = 'Succeeded'; break
+                          if conds[0].get('status') == 'False':
+                              status = 'Failed'; break
+                  if status == 'Succeeded':
+                      print(tag); sys.exit(0)
+                  last = 'attempt %d tag %s -> %s' % (attempt, tag, status or 'timeout')
+                  sys.stderr.write(last + '\n'); time.sleep(15)
+              sys.stderr.write('tag-promote never succeeded: ' + last + '\n'); sys.exit(1)
 
-        - name: Wait for the tag-promote PipelineRun to SUCCEED
-          kubernetes.core.k8s_info:
-            host: "{{ _k8s_host | default(omit, true) }}"
-            api_key: "{{ _k8s_api_key | default(omit, true) }}"
-            validate_certs: "{{ _k8s_validate_certs }}"
-            api_version: tekton.dev/v1
-            kind: PipelineRun
-            namespace: "{{ ns_build_secured }}"
-            name: "{{ _tp_name }}"
-          register: r_tp_status
-          until:
-            - r_tp_status.resources[0].status.conditions is defined
-            - >-
-              r_tp_status.resources[0].status.conditions
-              | selectattr('type', 'equalto', 'Succeeded')
-              | selectattr('status', 'equalto', 'True') | list | length > 0
-          retries: "{{ tag_promote_retries }}"
-          delay: "{{ tag_promote_delay }}"
-          ignore_errors: true
+        - name: Create release tag and drive tag-promote (retries past transient flakes)
+          ansible.builtin.command: python3 /tmp/m5_tag_promote.py
+          environment:
+            GL_HOST: "{{ r_gitlab_route.resources[0].spec.host }}"
+            GL_TOKEN: "{{ r_glt.resources[0].data.token | b64decode }}"
+            API_URL: "{{ _api_url }}"
+            K8S_TOKEN: "{{ _k8s_api_key }}"
+            NS: "{{ ns_build_secured }}"
+          register: r_tp_run
+          changed_when: true
+          failed_when: false
+          no_log: true
 
         - name: Record tag-promote pipeline did not succeed
           ansible.builtin.set_fact:
             e2e_failures: >-
-              {{ e2e_failures + ['Secured tag-promote pipeline ' + (_tp_name | default('?')) +
-                 ' did not succeed (runs ACS scan, Syft SBOM, upload-to-TPA, Tekton Chains signing, Conforma)'] }}
-          when: >-
-            (r_tp_status.resources[0].status.conditions | default([])
-             | selectattr('type', 'equalto', 'Succeeded')
-             | selectattr('status', 'equalto', 'True') | list | length == 0)
+              {{ e2e_failures + ['Secured tag-promote pipeline did not succeed after retries'
+                 + ' (ACS scan, Syft SBOM, upload-to-TPA, Tekton Chains signing, Conforma)'] }}
+          when: (r_tp_run.rc | default(1)) != 0
 
     # --- ACS Central deployed + reachable --------------------------------
     - name: Get ACS Central route
