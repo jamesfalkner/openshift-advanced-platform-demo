@@ -141,6 +141,18 @@
             _hpa_name: "{{ r_hpa.resources[0].metadata.name }}"
             _hpa_min: "{{ r_hpa.resources[0].spec.minReplicas | default(1) | int }}"
 
+        - name: Remove any stale load generator from a prior run
+          kubernetes.core.k8s:
+            host: "{{ _k8s_host | default(omit, true) }}"
+            api_key: "{{ _k8s_api_key | default(omit, true) }}"
+            validate_certs: "{{ _k8s_validate_certs }}"
+            state: absent
+            api_version: v1
+            kind: Pod
+            namespace: "{{ ns_prod }}"
+            name: qa-load-generator
+            wait: true
+
         - name: Launch load generator pod (mimics the demo's web-terminal command)
           kubernetes.core.k8s:
             host: "{{ _k8s_host | default(omit, true) }}"
@@ -164,7 +176,7 @@
                       - /bin/sh
                       - -c
                       - >-
-                        for i in $(seq 1 20); do
+                        for i in $(seq 1 60); do
                           (while true; do
                              curl -s -o /dev/null -k
                              http://parasol-insurance.{{ ns_prod }}.svc:8080/api/claims;
