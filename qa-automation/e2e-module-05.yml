@@ -206,7 +206,14 @@
                   sys.stderr.write(last + '\n'); time.sleep(15)
               sys.stderr.write('tag-promote never succeeded: ' + last + '\n'); sys.exit(1)
 
-        - name: Create release tag and drive tag-promote (retries past transient flakes)
+        # Run the (long, up to ~45 min) tag-promote driver ASYNCHRONOUSLY and
+        # poll it with async_status in an until-loop. ansible.builtin.command
+        # buffers a module's stdout and only emits it when the task finishes, so
+        # an in-script heartbeat cannot keep the Showroom SSE stream warm. The
+        # async_status retries below DO print a live "FAILED - RETRYING" line
+        # every `delay` seconds, which keeps the connection from going idle and
+        # being dropped by the router (the symptom: browser frozen on this task).
+        - name: Launch tag-promote driver (async)
           ansible.builtin.command: python3 /tmp/m5_tag_promote.py
           environment:
             GL_HOST: "{{ r_gitlab_route.resources[0].spec.host }}"
@@ -214,10 +221,20 @@
             API_URL: "{{ _api_url }}"
             K8S_TOKEN: "{{ _k8s_api_key }}"
             NS: "{{ ns_build_secured }}"
-          register: r_tp_run
+          async: 3600
+          poll: 0
+          register: r_tp_job
           changed_when: true
-          failed_when: false
           no_log: true
+
+        - name: Wait for tag-promote (streams progress to keep the connection warm)
+          ansible.builtin.async_status:
+            jid: "{{ r_tp_job.ansible_job_id }}"
+          register: r_tp_run
+          until: r_tp_run.finished
+          retries: 350
+          delay: 10
+          failed_when: false
 
         - name: Record tag-promote pipeline did not succeed
           ansible.builtin.set_fact:

@@ -296,7 +296,13 @@
                   time.sleep(25)
               sys.stderr.write('scaffolder never completed: ' + last + '\n'); sys.exit(1)
 
-        - name: Run the onboarding template (self-service scaffolder)
+        # Run the scaffolder driver ASYNCHRONOUSLY and poll with async_status.
+        # ansible.builtin.command buffers module stdout (only emitted when the
+        # task finishes), so an in-script heartbeat cannot keep the Showroom SSE
+        # stream warm. The async_status retries below print a live
+        # "FAILED - RETRYING" line every `delay` seconds, keeping the connection
+        # from going idle and being dropped by the router.
+        - name: Launch onboarding template scaffolder (async)
           ansible.builtin.command: python3 /tmp/m4_run_scaffolder.py
           environment:
             RHDH_URL: "{{ _rhdh_url }}"
@@ -305,10 +311,20 @@
             OWNER_EMAIL: "{{ m4_owner_email }}"
             GL_HOST: "{{ _gl_host }}"
             GL_TOKEN: "{{ _gl_token }}"
-          register: r_scaffold
+          async: 1800
+          poll: 0
+          register: r_scaffold_job
           changed_when: true
-          failed_when: false
           no_log: true
+
+        - name: Wait for scaffolder (streams progress to keep the connection warm)
+          ansible.builtin.async_status:
+            jid: "{{ r_scaffold_job.ansible_job_id }}"
+          register: r_scaffold
+          until: r_scaffold.finished
+          retries: 180
+          delay: 10
+          failed_when: false
 
         - name: Record onboarding scaffolder failed
           ansible.builtin.set_fact:
