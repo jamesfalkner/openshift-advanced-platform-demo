@@ -15,7 +15,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: quay-integration
-          image: registry.redhat.io/openshift4/ose-cli:latest
+          image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
           env:
             - name: QUAY_NAMESPACE
               value: {{ .Values.quay.namespace | quote }}
