@@ -24,6 +24,18 @@ spec:
             grpcPodConfig:
               {{- toYaml . | nindent 14 }}
             {{- end }}
+          {{- if .Values.keycloakCatalogSource.enabled }}
+          - name: {{ .Values.keycloakCatalogSource.name }}
+            image: {{ .Values.keycloakCatalogSource.image }}
+            tag: {{ .Values.keycloakCatalogSource.tag }}
+            namespace: {{ .Values.keycloakCatalogSource.namespace }}
+            displayName: {{ .Values.keycloakCatalogSource.displayName | quote }}
+            publisher: {{ .Values.keycloakCatalogSource.publisher | quote }}
+            {{- with .Values.keycloakCatalogSource.grpcPodConfig }}
+            grpcPodConfig:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
   syncPolicy:
     automated:
       prune: true

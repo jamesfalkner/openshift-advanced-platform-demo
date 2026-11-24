@@ -21,7 +21,11 @@ spec:
         keycloak-operator:
           keycloak:
             subscription:
+              {{- if .Values.keycloakCatalogSource.enabled }}
+              source: {{ .Values.keycloakCatalogSource.name }}
+              {{- else }}
               source: {{ include "app-of-apps.operatorSource" . }}
+              {{- end }}
         keycloak:
           nameOverride: {{ .Values.keycloak.crName }}
           route:

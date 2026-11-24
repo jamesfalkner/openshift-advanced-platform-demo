@@ -13,8 +13,23 @@ catalogSource:
   name: redhat-operators-snapshot
   namespace: openshift-marketplace
   image: quay.io/rhpds/olm_snapshot_redhat_catalog
-  tag: v4.21_2026_05_25
+  tag: v5.0_2026_11_16
   displayName: "Red Hat Operators (Snapshot)"
+  publisher: "Red Hat Demo Platform"
+  grpcPodConfig:
+    extractContent:
+      catalogDir: /configs
+      cacheDir: /tmp/cache
+
+# Secondary catalog source for operators not in the primary snapshot.
+# Keycloak (rhbk-operator) is not in the v5.0 snapshot; pin it from v4.22.
+keycloakCatalogSource:
+  enabled: false
+  name: redhat-operators-snapshot-v422
+  namespace: openshift-marketplace
+  image: quay.io/rhpds/olm_snapshot_redhat_catalog
+  tag: v4.22_2026_11_09
+  displayName: "Red Hat Operators (Snapshot v4.22)"
   publisher: "Red Hat Demo Platform"
   grpcPodConfig:
     extractContent:
