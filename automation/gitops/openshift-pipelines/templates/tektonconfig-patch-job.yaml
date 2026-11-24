@@ -26,6 +26,9 @@ rules:
   - apiGroups: ["operator.tekton.dev"]
     resources: ["tektonconfigs"]
     verbs: ["get", "patch"]
+  - apiGroups: ["operator.openshift.io"]
+    resources: ["consoles"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -81,8 +84,12 @@ spec:
               # and deep inspection for per-task details in pipeline attestations.
               oc patch tektonconfig config --type merge \
                 -p '{"spec":{"pipeline":{"coschedule":"pipelineruns"},"chain":{"transparency.enabled":"true","transparency.url":"http://rekor-server.{{ .Values.rhtas.namespace }}.svc","artifacts.pipelinerun.enable-deep-inspection":"true"}}}'
-
               echo "TektonConfig patched"
+
+              echo "Enabling console plugins..."
+              oc patch console.operator.openshift.io cluster --type merge \
+                -p '{"spec":{"plugins":["networking-console-plugin","monitoring-plugin","ossmconsole","pipelines-console-plugin","gitops-plugin"]}}'
+              echo "Console plugins enabled"
           resources:
             requests:
               cpu: 50m
