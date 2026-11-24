@@ -348,7 +348,7 @@ image::parasol-claim-stats-live.png[Parasol Insurance application showing the cl
 * Log into GitLab as the `pe1` user, navigate to the `parasol-insurance` repository, noting the latest commit from the developer.
 * Click on **Tags** on the right, and select **New Tag** to create a new tag, with a name (e.g. `1.1`, or `prod-20240601`) and linking it to the latest commit on the `main` branch. You can leave the rest of the fields blank, scroll to the bottom and click **Create tag**.
 * With the new tag created, a new pipeline begins to build the production image (at the specified tag), and issue a new MR to the GitOps repo to update the production image.
-* Once the pipeline completes, navigate to the https://gitlab-gitlab.{subdomain}/parasol/parasol-insurance-manifests[GitOps repository in GitLab], and you will see a new MR to update the production image tag. Review the MR and approve/merge it to merge the change.
+* Once the pipeline completes, navigate to the https://gitlab-gitlab.{subdomain}/parasol/parasol-insurance-manifests[GitOps repository in GitLab^], and you will see a new MR to update the production image tag. Review the MR and approve/merge it to merge the change.
 * With the change merged, Argo CD detects the new desired state and deploys the new version to production automatically.
 
 image::argocd-promote.png[Argo promotion,link=self,window=blank,align="center",width=700,title="New production app being rolled out in the Parasol production environment"]

@@ -4,7 +4,7 @@ include::partial$_attributes.adoc[]
 
 [NOTE]
 ====
-**Presenter note:** Section 2 picks up after time has passed. Parasol has adopted platform engineering practices and implemented an internal developer portal (IDP) with Red Hat Developer Hub, a product based on https://backstage.io/[Backstage]. They have also established a more secure software supply chain. The foundational platform from Section 1 is in place -- now the organization is ready to adopt advanced capabilities that improve discoverability, self-service, and software supply chain security.
+**Presenter note:** Section 2 picks up after time has passed. Parasol has adopted platform engineering practices and implemented an internal developer portal (IDP) with Red Hat Developer Hub, a product based on https://backstage.io/[Backstage^]. They have also established a more secure software supply chain. The foundational platform from Section 1 is in place -- now the organization is ready to adopt advanced capabilities that improve discoverability, self-service, and software supply chain security.
 ====
 
 [#part-1]
