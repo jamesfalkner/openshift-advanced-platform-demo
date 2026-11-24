@@ -23,7 +23,8 @@ spec:
     enabled: {{ .Values.ingress.enabled }}
   http:
     httpEnabled: true
+  proxy:
+    headers: xforwarded
   hostname:
-    hostname: {{ include "keycloak.hostname" . }}
-    strict: false
+    hostname: https://{{ include "keycloak.hostname" . }}
     adminUrl: https://{{ include "keycloak.hostname" . }}
