@@ -356,9 +356,10 @@ The External Secrets Operator integrates with HashiCorp Vault to provide central
 [TIP]
 ====
 Retrieve the Vault token from the {console_url}/k8s/ns/vault/core~v1~Secret[`vault-token` Secret^] or using this command:
-```
-oc get secret vault-token -n vault -o jsonpath=pass:a['{.data.token}'] | base64 -d
-```
+[source,bash,subs="-attributes"]
+----
+oc get secret vault-token -n vault -o jsonpath='{.data.token}' | base64 -d
+----
 ====
 
 +
