@@ -62,6 +62,7 @@ image::devspaces-dependency-analytics-report.png[DevSpaces IDE showing Dependenc
 . **Remove the unnecessary dependency** by deleting the `quarkus-rest` entry from `pom.xml`:
 * Show the dependency being removed
 * "The `<dependency>` block is removed. The dependency tree is cleaner, the attack surface is smaller, and the potential for runtime incompatibilities is eliminated. In the old workflow, this would have surfaced as a confusing build failure or runtime error much later."
+* Optionally, further improve security by updating the Quarkus platform version in `pom.xml`: change `<quarkus.platform.version>` to a newer version such as `3.40.1.2` (the latest at the time of this writing). This pulls in the latest security patches across all Quarkus dependencies.
 
 . Show that the remaining dependencies are clean:
 * Point out dependencies with no issues flagged
