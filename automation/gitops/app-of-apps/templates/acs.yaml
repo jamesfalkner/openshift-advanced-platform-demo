@@ -15,7 +15,11 @@ spec:
       valuesObject:
         acs-operator:
           subscription:
+            {{- if .Values.keycloakCatalogSource.enabled }}
+            source: {{ .Values.keycloakCatalogSource.name }}
+            {{- else }}
             source: {{ include "app-of-apps.operatorSource" . }}
+            {{- end }}
         acs-instance:
           clusterName: {{ .Values.acs.clusterName }}
           adminPassword: {{ .Values.acs.adminPassword }}
