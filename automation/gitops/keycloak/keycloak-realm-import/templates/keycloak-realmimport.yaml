@@ -1,5 +1,4 @@
 {{- $globexWebGatewayContainerId := printf "%s" (uuidv4 | toString) }}
-{{- $clientRealmManagementContainerId := printf "%s" (uuidv4 | toString) }}
 {{- $clientBrokerContainerId := printf "%s" (uuidv4 | toString) }}
 {{- $accountContainerId := printf "%s" (uuidv4 | toString) }}
 ---
@@ -119,174 +118,7 @@ spec:
           clientRole: false
           containerId: {{ $.Values.realm.name }}
           attributes: {}
-      client:
-        realm-management:
-          - id: {{ uuidv4 }}
-            name: view-events
-            description: "${role_view-events}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: impersonation
-            description: "${role_impersonation}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: realm-admin
-            description: "${role_realm-admin}"
-            composite: true
-            composites:
-              client:
-                realm-management:
-                  - view-events
-                  - impersonation
-                  - view-identity-providers
-                  - query-realms
-                  - view-clients
-                  - query-clients
-                  - view-authorization
-                  - view-users
-                  - manage-authorization
-                  - manage-users
-                  - manage-realm
-                  - manage-clients
-                  - query-groups
-                  - manage-events
-                  - query-users
-                  - create-client
-                  - manage-identity-providers
-                  - view-realm
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: view-identity-providers
-            description: "${role_view-identity-providers}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: query-realms
-            description: "${role_query-realms}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: view-clients
-            description: "${role_view-clients}"
-            composite: true
-            composites:
-              client:
-                realm-management:
-                  - query-clients
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: query-clients
-            description: "${role_query-clients}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: view-authorization
-            description: "${role_view-authorization}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-authorization
-            description: "${role_manage-authorization}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: view-users
-            description: "${role_view-users}"
-            composite: true
-            composites:
-              client:
-                realm-management:
-                  - query-groups
-                  - query-users
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-users
-            description: "${role_manage-users}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-realm
-            description: "${role_manage-realm}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-clients
-            description: "${role_manage-clients}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: query-groups
-            description: "${role_query-groups}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-events
-            description: "${role_manage-events}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: query-users
-            description: "${role_query-users}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: create-client
-            description: "${role_create-client}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: manage-identity-providers
-            description: "${role_manage-identity-providers}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-          - id: {{ uuidv4 }}
-            name: view-realm
-            description: "${role_view-realm}"
-            composite: false
-            clientRole: true
-            containerId: {{ $clientRealmManagementContainerId }}
-            attributes: {}
-        security-admin-console: []
-        admin-cli: []
-        account-console: []
+      client: {}
         broker:
           - id: {{ uuidv4 }}
             name: read-token
@@ -1012,42 +844,6 @@ spec:
         frontchannelLogout: false
         protocol: openid-connect
         attributes: {}
-        authenticationFlowBindingOverrides: {}
-        fullScopeAllowed: false
-        nodeReRegistrationTimeout: 0
-        defaultClientScopes:
-          - web-origins
-          - acr
-          - profile
-          - roles
-          - email
-        optionalClientScopes:
-          - address
-          - phone
-          - offline_access
-          - microprofile-jwt
-      - id: {{ $clientRealmManagementContainerId }}
-        clientId: realm-management
-        name: "${client_realm-management}"
-        surrogateAuthRequired: false
-        enabled: true
-        alwaysDisplayInConsole: false
-        clientAuthenticatorType: client-secret
-        secret: "{{ randAlphaNum 32 }}"
-        redirectUris: []
-        webOrigins: []
-        notBefore: 0
-        bearerOnly: true
-        consentRequired: false
-        standardFlowEnabled: true
-        implicitFlowEnabled: false
-        directAccessGrantsEnabled: false
-        serviceAccountsEnabled: false
-        publicClient: false
-        frontchannelLogout: false
-        protocol: openid-connect
-        attributes:
-          post.logout.redirect.uris: "+"
         authenticationFlowBindingOverrides: {}
         fullScopeAllowed: false
         nodeReRegistrationTimeout: 0
@@ -2194,7 +1990,6 @@ spec:
       parRequestUriLifespan: '60'
       cibaInterval: '5'
       realmReusableOtpCode: 'false'
-    keycloakVersion: 24.0.8.redhat-00004
     userManagedAccessAllowed: false
     clientProfiles:
       profiles: []
