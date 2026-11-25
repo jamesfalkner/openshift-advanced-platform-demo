@@ -161,9 +161,9 @@ oc get secret openshift-gitops-cluster -n openshift-gitops -o jsonpath='{.data.a
 * Secrets browser: {vault_secrets_url}[{vault_secrets_url}^]
 * Login with the root token. Retrieve it from the `vault-token` secret in the `vault` namespace:
 +
-[source,bash,role="copypaste"]
+[source,bash,role="copypaste",subs="-attributes"]
 ----
-oc get secret vault-token -n vault -o jsonpath='{.data.token}' | base64 -d
+oc get secret vault-token -n vault -o jsonpath='{.data.token}' | base64 -d && echo
 ----
 
 === LLM endpoint (Section 3)
@@ -224,9 +224,9 @@ The commands will take about 1-2 minutes to complete. Wait for all rollouts to f
 . Verify Vault is accessible at {vault_url}[{vault_url}^]:
 .. Retrieve the root token with
 +
-[source,bash,role="copypaste"]
+[source,bash,role="copypaste",subs="-attributes"]
 ----
-oc get secret vault-token -n vault -o jsonpath='\{.data.token}' | base64 -d
+oc get secret vault-token -n vault -o jsonpath='{.data.token}' | base64 -d && echo
 ----
 +
 .. Log in with the root token and verify Parasol secrets are configured at {vault_secrets_url}[{vault_secrets_url}^]
