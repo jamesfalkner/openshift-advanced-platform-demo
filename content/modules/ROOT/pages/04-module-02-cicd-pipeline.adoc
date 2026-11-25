@@ -170,7 +170,7 @@ The assistant should give you the code in the response, that you can copy/paste 
 * Roo might prompt you to accept multiple changes, showing a diff as it goes -- go ahead and allow them by clicking *Save*
 * "The AI understood the Sonarqube findings and fixed the code smells. The developer can inspect the diff to verify the changes before accepting them. This is AI-assisted development governed by the platform."
 +
-image::devspaces-roo-diff.png[Zoo Code AI assistant after making fixes. The developer used the Source view to review the final diff with the code fixes: System.out.println replaced with Log.info and empty catch block removed,link=self,window=blank,align="center",width=700,title="AI-generated code fixes with diff view"]
+image::devspaces-zoo-diff.png[Zoo Code AI assistant after making fixes. The developer used the Source view to review the final diff with the code fixes: System.out.println replaced with Log.info and empty catch block removed,link=self,window=blank,align="center",width=700,title="AI-generated code fixes with diff view"]
 
 . Verify the corrected code looks like this (for reference, or in case the LLM responds differently):
 
