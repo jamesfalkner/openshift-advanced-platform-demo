@@ -234,24 +234,31 @@ data:
           until: r_wait_import.status == 200
 
 {{- range $file := $item1.fileOverrides }}
-        - name: Update {{ $file.path }} in {{ $item1.name }}
+        - name: Create or update {{ $file.path }} in {{ $item1.name }}
           ansible.builtin.uri:
             url: https://{{ $.Values.gitlab.host }}/api/v4/projects/{{ $item.name }}%2F{{ $item1.name }}/repository/files/{{ $file.path | replace "/" "%2F" }}
-            method: PUT
+            method: '{{ "{{" }} item.method {{ "}}" }}'
             body_format: json
             body:
               branch: {{ $item1.defaultBranch | default "main" }}
               content: {{ $file.content | quote }}
-              commit_message: "Override {{ $file.path }} for lab environment"
+              commit_message: '{{ "{{" }} item.message {{ "}}" }}'
             headers:
               PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
             validate_certs: false
-            status_code:
-              - 200
-          register: r_file_update
+            status_code: '{{ "{{" }} item.status {{ "}}" }}'
+          register: r_file_override
           retries: 10
           delay: 5
-          until: r_file_update.status == 200
+          until: r_file_override.status | int == item.status | int
+          loop:
+            - method: PUT
+              status: 200
+              message: "Update {{ $file.path }} for lab environment"
+            - method: POST
+              status: 201
+              message: "Create {{ $file.path }} for lab environment"
+          when: (r_file_override is not defined) or (r_file_override is failed)
 {{- end }}
 {{- end }}
 {{- end }}
