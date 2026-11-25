@@ -2,15 +2,15 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
-  port: 8080
+  port: https
 
 route:
   enabled: true
   host:
-  localName: 
+  localName:
   tlsEnabled: true
   tls:
-    termination: edge
+    termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect
 
 database:

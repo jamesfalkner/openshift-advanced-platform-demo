@@ -14,7 +14,7 @@ spec:
   {{ end }}
   to:
     kind: Service
-    name: {{ include "keycloak.name" . }}-service
+    name: {{ include "keycloak.name" . }}
     weight: 100
   port:
     targetPort: {{ .Values.service.port }}

@@ -19,12 +19,12 @@ spec:
       name: {{ .Values.database.secret }}
       key: database-password
   instances: 1
-  ingress: 
+  ingress:
     enabled: {{ .Values.ingress.enabled }}
   http:
-    httpEnabled: true
-  proxy:
-    headers: xforwarded
+    httpEnabled: false
+    tlsSecret: keycloak-tls
   hostname:
-    hostname: https://{{ include "keycloak.hostname" . }}
-    adminUrl: https://{{ include "keycloak.hostname" . }}
+    hostname: {{ include "keycloak.hostname" . }}
+    strict: false
+    strictBackchannel: false

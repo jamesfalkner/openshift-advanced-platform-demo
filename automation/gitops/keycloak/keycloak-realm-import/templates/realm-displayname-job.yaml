@@ -60,7 +60,7 @@ spec:
               set -euo pipefail
               REALM="{{ .Values.realm.name }}"
               DISPLAY_NAME="{{ .Values.realm.displayName | default "OpenShift Advanced App Platform Workshop" }}"
-              SSO_URL="http://keycloak-service.keycloak.svc:8080"
+              SSO_URL="https://{{ .Values.keycloak.name }}.keycloak.svc:8443"
 
               ADMIN_USER=$(oc get secret keycloak-initial-admin -n keycloak -o jsonpath='{.data.username}' | base64 -d)
               ADMIN_PASS=$(oc get secret keycloak-initial-admin -n keycloak -o jsonpath='{.data.password}' | base64 -d)
