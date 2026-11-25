@@ -36,15 +36,18 @@ Service Mesh provides traffic management, mTLS encryption, and fine-grained acce
 * This is integrated directly into the OpenShift console. No separate tool to access.
 * "The Service Mesh console is built into OpenShift. The platform engineer does not need a separate dashboard. Everything is accessible from the same console."
 
-. On the **Overview** page, show the namespaces enrolled in the mesh:
+. On the **Service Mesh -> Namespaces** page, show the namespaces enrolled in the mesh:
 * Point out the health indicators (green for healthy). Some namespaces are _enrolled_ in the mesh, some are not (indicated by the presence of "istio config" field).
 * "All services enrolled in the mesh get mutual TLS encryption automatically. The developers did not write a single line of TLS code. The mesh handles certificate generation, rotation, and validation automatically. This satisfies the compliance requirement for encryption in transit."
++
+image::ossm-console-overview.png[OpenShift Service Mesh overview,link=self,window=blank,align="center",width=700,title="Service Mesh console: overview"]
 
-. Search for **parasol-insurance-prod** in the overview:
+. Navigate to **Home -> Projects** and search for and click on `parasol-insurance-prod`
+. Visit the *Service Mesh* tab for the project.
 * Point out the production namespace with its services
-* "Here is the Parasol application's production namespace. The platform manages communication between all services automatically."
+* "Here is the Parasol application's production namespace mesh. The platform manages communication between all services automatically."
 
-. Click the **three-dot menu** (kebab menu) next to `parasol-insurance-prod` and select **Update Traffic Policies**:
+. Click the **three-dot menu** (kebab menu) at the right and select **Update Traffic Policies**:
 * Show the traffic policy creation form.
 * "This is where the platform engineer can define traffic routing policies -- canary deployments, traffic splits, rate limiting, circuit breakers -- all without touching application code. The mesh applies these policies at the infrastructure level."
 * "For example, if Parasol wants to roll out a new version to 10% of traffic first, the platform engineer configures it here. No code changes, no redeployments, just a policy change."
@@ -56,8 +59,6 @@ Service Mesh provides traffic management, mTLS encryption, and fine-grained acce
 
 . Briefly discuss **access policies** (talk track):
 * "Service Mesh also supports authorization policies that control which services can communicate with each other. This is the principle of least privilege applied to service-to-service communication. Only authorized services can make requests. This is configured by the platform team, not the developers."
-
-image::ossm-console-overview.png[OpenShift Service Mesh console showing the Parasol application namespace with service health indicators and mTLS status,link=self,window=blank,align="center",width=700,title="Service Mesh console: namespace overview"]
 
 **What they should notice:**
 
@@ -119,10 +120,10 @@ oc run load-generator --image=quay.io/curl/curl:latest \
   "while true; do curl -s -o /dev/null http://parasol-insurance.{parasol_prod_ns}.svc:8080/api/claims; done"
 ----
 
-. From the **Overview** page, click the **three-dot menu** (kebab menu) next to `parasol-insurance-prod` and select **Graph**:
+. From the **Service Mesh** page for the namespace, agaio click the **three-dot menu** (kebab menu)  select **Show full graph**:
 * On the Display menu, enable *Traffic Animation* and *Waypoint Proxies*, and set the refresh rate to 10 seconds at the upper right.
 * In the graph dropdown select the *Workload graph*
-* Show the service graph with animated traffic flow between the Parasol services
+* Show the service graph with animated traffic flow between the Parasol services (it will take about 1 minute for the load generator to display traffic in the graph)
 * "This is a live traffic graph. The lines represent actual requests flowing between services right now. The animation shows the direction and volume of traffic."
 * Point out the service nodes and the connections between them
 +
@@ -156,22 +157,22 @@ image::ossm-console-traffic.png[OpenShift Service Mesh traffic,link=self,window=
 * In the traffic graph, click on the **parasol-insurance** service node (the triangle icon)
 * Click the **three-dot menu** on the right side panel and select **Fault Injection**
 * Select **Add HTTP Abort** and set the **Abort Percentage** to `5`
-* Click **Preview** to see the new _DestinationRule_ that will be applied, then click **Create** to inject the fault, and confirm the creation by clicking **Create** again.
+* Click **Create** to see the new _DestinationRule_ that will be applied, then click **Create** to inject the fault, and confirm the creation by clicking **Create** again.
 * "The platform engineer just injected a 5% failure rate into the Parasol service -- without touching any application code. This is useful for testing how applications behave when facing network failures. You can also inject latency, timeouts, and other fault conditions to simulate real-world degradation."
-* Watch the traffic graph animation -- error percentages start rising and the service node turns **yellow**, signaling to the platform engineer that something needs investigation
+* Watch the traffic graph animation -- error percentages start rising and the service node turns **yellow** in a few moments, signaling to the platform engineer that something needs investigation
 * "Notice the service turned yellow and the error rate is climbing. In a real scenario, this is exactly what the platform engineer would see if a downstream service started failing. The mesh gives immediate, visual feedback -- no need to dig through logs."
 * After demonstrating, remove the fault injection by clicking the three-dot menu again, selecting **Delete Traffic Routing**, and confirming
 
 . Show **workload observability** using the OpenShift built-in monitoring:
 * Navigate to **Observe** -> **Metrics** in the OpenShift web console
-* Show CPU and memory utilization metrics for the Parasol workloads
+* Select various pre-set Queries via the *Queries* selector (e.g. CPU and memory utilization metrics for the Parasol workloads, and the traffic generator as well)
 * "Beyond service mesh observability, the platform provides workload-level monitoring out of the box. CPU usage, memory consumption, network throughput -- all available without any additional tooling."
 
 . Navigate to **Observe** -> **Dashboards**:
-* Show the aggregate dashboard with CPU, memory, and network metrics
+* Scroll down to show the aggregate dashboard with CPU, memory, and network metrics
 * "These dashboards can be customized for specific teams or applications. Platform engineers can build views that aggregate metrics across all Parasol services, or drill down into individual workloads."
 
-. Briefly mention **custom alerts** under **Observe**:
+. Briefly mention **Alerts** under **Observe**:
 * "The platform also supports custom alerts. Platform engineers can define thresholds -- for example, alert if CPU exceeds 80% for 5 minutes, or if memory usage trends upward consistently. These alerts catch misbehaving applications before they impact customers."
 
 // TODO: Add screenshot of Observe -> Dashboards showing aggregate resource dashboard
