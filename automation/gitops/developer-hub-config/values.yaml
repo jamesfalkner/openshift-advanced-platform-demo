@@ -16,7 +16,7 @@ sonarqube:
 keycloak:
   host: ""
   realm: backstage
-  loginRealm: master
+  loginRealm: backstage
 
 cluster:
   subdomain: ""
