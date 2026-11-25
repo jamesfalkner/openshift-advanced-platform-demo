@@ -24,14 +24,14 @@ spec:
             grpcPodConfig:
               {{- toYaml . | nindent 14 }}
             {{- end }}
-          {{- if .Values.keycloakCatalogSource.enabled }}
-          - name: {{ .Values.keycloakCatalogSource.name }}
-            image: {{ .Values.keycloakCatalogSource.image }}
-            tag: {{ .Values.keycloakCatalogSource.tag }}
-            namespace: {{ .Values.keycloakCatalogSource.namespace }}
-            displayName: {{ .Values.keycloakCatalogSource.displayName | quote }}
-            publisher: {{ .Values.keycloakCatalogSource.publisher | quote }}
-            {{- with .Values.keycloakCatalogSource.grpcPodConfig }}
+          {{- if .Values.secondaryCatalogSource.enabled }}
+          - name: {{ .Values.secondaryCatalogSource.name }}
+            image: {{ .Values.secondaryCatalogSource.image }}
+            tag: {{ .Values.secondaryCatalogSource.tag }}
+            namespace: {{ .Values.secondaryCatalogSource.namespace }}
+            displayName: {{ .Values.secondaryCatalogSource.displayName | quote }}
+            publisher: {{ .Values.secondaryCatalogSource.publisher | quote }}
+            {{- with .Values.secondaryCatalogSource.grpcPodConfig }}
             grpcPodConfig:
               {{- toYaml . | nindent 14 }}
             {{- end }}

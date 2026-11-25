@@ -36,12 +36,12 @@ ocp4_etx_app_platform_catalog_source_namespace: openshift-marketplace
 ocp4_etx_app_platform_catalog_source_image: quay.io/rhpds/olm_snapshot_redhat_catalog
 ocp4_etx_app_platform_catalog_source_tag: v5.0_2026_11_16
 
-# Secondary catalog source for Keycloak (rhbk-operator not in v5.0 snapshot)
-ocp4_etx_app_platform_keycloak_catalog_source_enabled: false
-ocp4_etx_app_platform_keycloak_catalog_source_name: redhat-operators-snapshot-v422
-ocp4_etx_app_platform_keycloak_catalog_source_namespace: openshift-marketplace
-ocp4_etx_app_platform_keycloak_catalog_source_image: quay.io/rhpds/olm_snapshot_redhat_catalog
-ocp4_etx_app_platform_keycloak_catalog_source_tag: v4.22_2026_11_09
+# Secondary catalog source for operators needing v4.22 snapshot (Keycloak, ACS)
+ocp4_etx_app_platform_secondary_catalog_source_enabled: false
+ocp4_etx_app_platform_secondary_catalog_source_name: redhat-operators-snapshot-v422
+ocp4_etx_app_platform_secondary_catalog_source_namespace: openshift-marketplace
+ocp4_etx_app_platform_secondary_catalog_source_image: quay.io/rhpds/olm_snapshot_redhat_catalog
+ocp4_etx_app_platform_secondary_catalog_source_tag: v4.22_2026_11_09
 
 ocp4_etx_app_platform_openshift_gitops_operator_config:
   env:

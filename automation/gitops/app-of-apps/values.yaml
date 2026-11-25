@@ -21,9 +21,10 @@ catalogSource:
       catalogDir: /configs
       cacheDir: /tmp/cache
 
-# Secondary catalog source for operators not in the primary snapshot.
-# Keycloak (rhbk-operator) is not in the v5.0 snapshot; pin it from v4.22.
-keycloakCatalogSource:
+# Secondary catalog source for operators that need a different snapshot version.
+# Keycloak (rhbk-operator) is not in the v5.0 snapshot, and ACS (rhacs-operator)
+# must stay on v4.x to avoid breaking roxctl URL changes in v5.0.
+secondaryCatalogSource:
   enabled: false
   name: redhat-operators-snapshot-v422
   namespace: openshift-marketplace

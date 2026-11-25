@@ -15,8 +15,8 @@ spec:
       valuesObject:
         acs-operator:
           subscription:
-            {{- if .Values.keycloakCatalogSource.enabled }}
-            source: {{ .Values.keycloakCatalogSource.name }}
+            {{- if .Values.secondaryCatalogSource.enabled }}
+            source: {{ .Values.secondaryCatalogSource.name }}
             {{- else }}
             source: {{ include "app-of-apps.operatorSource" . }}
             {{- end }}

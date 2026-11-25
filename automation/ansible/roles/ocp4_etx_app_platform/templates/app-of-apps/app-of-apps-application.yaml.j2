@@ -52,12 +52,12 @@ spec:
           image: {{ ocp4_etx_app_platform_catalog_source_image }}
           tag: {{ ocp4_etx_app_platform_catalog_source_tag }}
 
-        keycloakCatalogSource:
-          enabled: {{ ocp4_etx_app_platform_keycloak_catalog_source_enabled }}
-          name: {{ ocp4_etx_app_platform_keycloak_catalog_source_name }}
-          namespace: {{ ocp4_etx_app_platform_keycloak_catalog_source_namespace }}
-          image: {{ ocp4_etx_app_platform_keycloak_catalog_source_image }}
-          tag: {{ ocp4_etx_app_platform_keycloak_catalog_source_tag }}
+        secondaryCatalogSource:
+          enabled: {{ ocp4_etx_app_platform_secondary_catalog_source_enabled }}
+          name: {{ ocp4_etx_app_platform_secondary_catalog_source_name }}
+          namespace: {{ ocp4_etx_app_platform_secondary_catalog_source_namespace }}
+          image: {{ ocp4_etx_app_platform_secondary_catalog_source_image }}
+          tag: {{ ocp4_etx_app_platform_secondary_catalog_source_tag }}
 
         cluster:
           subdomain: {{ r_openshift_subdomain }}
