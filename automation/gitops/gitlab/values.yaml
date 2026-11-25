@@ -42,6 +42,112 @@ gitlab:
           url: https://github.com/redhat-pe-workshop/rhdh-template-developer-self-service.git
         - name: devfiles
           url: https://github.com/redhat-ads-tech/devfiles.git
+          fileOverrides:
+            - path: devfile.yaml
+              content: |
+                schemaVersion: 2.2.0
+                metadata:
+                  name: default-devfile
+                components:
+                  - name: development-tooling
+                    container:
+                      image: registry.redhat.io/devspaces/udi-rhel9:3.26.1
+                      env:
+                        - name: QUARKUS_HTTP_HOST
+                          value: 0.0.0.0
+                        - name: MAVEN_OPTS
+                          value: "-Dmaven.repo.local=/home/user/.m2/repository"
+                        - name: DOCKER_HOST
+                          value: unix:///tmp/podman.sock
+                        - name: TESTCONTAINERS_RYUK_DISABLED
+                          value: "true"
+                        - name: HOST_USERS
+                          value: "false"
+                        - name: QUARKUS_ANALYTICS_DISABLED
+                          value: "true"
+                        - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+                          value: "1"
+                      memoryLimit: 5Gi
+                      cpuLimit: 2500m
+                      volumeMounts:
+                        - name: m2
+                          path: /home/user/.m2
+                      endpoints:
+                        - name: quarkus-dev
+                          targetPort: 8080
+                          exposure: public
+                          secure: false
+                          protocol: https
+                        - name: debug
+                          targetPort: 5005
+                          exposure: none
+                          secure: false
+                          protocol: tcp
+                        - name: tests
+                          targetPort: 8081
+                          exposure: none
+                          secure: false
+                          protocol: tcp
+                  - name: m2
+                    volume:
+                      size: 1G
+                commands:
+                  - id: package
+                    exec:
+                      label: "1. Package the application"
+                      component: development-tooling
+                      commandLine: "./mvnw package"
+                      group:
+                        kind: build
+                        isDefault: true
+                  - id: start-dev
+                    exec:
+                      label: "2. Start Development mode (Hot reload + debug)"
+                      component: development-tooling
+                      commandLine: "./mvnw compile quarkus:dev -Dquarkus.analytics.disabled=true"
+                      group:
+                        kind: run
+                        isDefault: true
+                  - id: init-podman-socket
+                    exec:
+                      label: "Start podman socket"
+                      component: development-tooling
+                      commandLine: |
+                        /usr/bin/podman.orig system service --time=0 unix:///tmp/podman.sock &
+                        sleep 2
+                        if [ -S /tmp/podman.sock ]; then
+                          echo "Podman socket ready"
+                        else
+                          echo "WARNING: Podman socket not created"
+                        fi
+                      group:
+                        kind: build
+                  - id: init-claude
+                    exec:
+                      label: "Install Claude CLI and config"
+                      component: development-tooling
+                      commandLine: |
+                        curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh
+                        chmod +x /tmp/claude-install.sh
+                        /tmp/claude-install.sh
+                        cp /home/user/.claude-config/.claude.json /home/user/.claude.json
+                      group:
+                        kind: build
+                  - id: configure-settings
+                    exec:
+                      label: "Configure editor settings"
+                      component: development-tooling
+                      commandLine: |
+                        jq '. + {"zoo-code.autoImportSettingsPath": "/home/user/.zoo-code/zoo-code-settings.json", "claudeCode.useTerminal": true}' \
+                          /checode/remote/data/Machine/settings.json > /tmp/settings.json && \
+                          mv /tmp/settings.json /checode/remote/data/Machine/settings.json
+                      group:
+                        kind: build
+                events:
+                  postStart:
+                    - init-podman-socket
+                    - init-claude
+                    - configure-settings
         - name: rhdh-templates
           url: https://github.com/redhat-ads-tech/ocp-app-platform-demo-rhdh-templates.git
         - name: helm-charts
@@ -78,12 +184,6 @@ gitlab:
                     "redhat.vscode-quarkus",
                     "redhat.fabric8-analytics"
                   ]
-                }
-            - path: .vscode/settings.json
-              content: |
-                {
-                  "zoo-code.autoImportSettingsPath": "/home/user/.zoo-code/zoo-code-settings.json",
-                  "chat.disableAIFeatures": true
                 }
         - name: parasol-insurance-manifests
           url: https://github.com/redhat-ads-tech/parasol-insurance-manifests.git
