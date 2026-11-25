@@ -118,7 +118,7 @@ spec:
           clientRole: false
           containerId: {{ $.Values.realm.name }}
           attributes: {}
-      client: {}
+      client:
         broker:
           - id: {{ uuidv4 }}
             name: read-token
