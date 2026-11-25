@@ -217,6 +217,45 @@ data:
             - name: {{ $item1.name }}
               defaultBranch: {{ $item1.defaultBranch | default "main" }}
 {{- end }}
+
+{{- range $item1 := $item.repo }}
+{{- if $item1.fileOverrides }}
+        - name: Wait for import of {{ $item1.name }} to complete
+          ansible.builtin.uri:
+            url: https://{{ $.Values.gitlab.host }}/api/v4/projects/{{ $item.name }}%2F{{ $item1.name }}/repository/branches/{{ $item1.defaultBranch | default "main" }}
+            method: GET
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code: 200
+          register: r_wait_import
+          retries: 60
+          delay: 10
+          until: r_wait_import.status == 200
+
+{{- range $file := $item1.fileOverrides }}
+        - name: Update {{ $file.path }} in {{ $item1.name }}
+          ansible.builtin.uri:
+            url: https://{{ $.Values.gitlab.host }}/api/v4/projects/{{ $item.name }}%2F{{ $item1.name }}/repository/files/{{ $file.path | replace "/" "%2F" }}
+            method: PUT
+            body_format: json
+            body:
+              branch: {{ $item1.defaultBranch | default "main" }}
+              content: {{ $file.content | quote }}
+              commit_message: "Override {{ $file.path }} for lab environment"
+            headers:
+              PRIVATE-TOKEN: '{{ "{{" }} root_token {{ "}}" }}'
+            validate_certs: false
+            status_code:
+              - 200
+          register: r_file_update
+          retries: 10
+          delay: 5
+          until: r_file_update.status == 200
+{{- end }}
+{{- end }}
+{{- end }}
+
 {{- end }}
 
 {{- if $item.project }}

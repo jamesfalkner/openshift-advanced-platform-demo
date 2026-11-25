@@ -67,6 +67,18 @@ gitlab:
       repo:
         - name: parasol-insurance
           url: https://github.com/redhat-ads-tech/parasol-insurance.git
+          fileOverrides:
+            - path: .vscode/extensions.json
+              content: |
+                {
+                  "recommendations": [
+                    "redhat.java",
+                    "ZooCodeOrganization.zoo-code",
+                    "redhat.vscode-yaml",
+                    "redhat.vscode-quarkus",
+                    "redhat.fabric8-analytics"
+                  ]
+                }
         - name: parasol-insurance-manifests
           url: https://github.com/redhat-ads-tech/parasol-insurance-manifests.git
         - name: parasol-insurance-secured-manifests
