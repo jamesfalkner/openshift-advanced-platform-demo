@@ -119,7 +119,7 @@ TIP: Using a separate browser avoids session conflicts with the `{dev_user}` ses
 * Wait for the provisioning to complete
 * "This is the same self-service workflow from Module 4. A new developer, a new branch, a fully provisioned environment in seconds."
 
-. Click **Open In Catalog**, then click the **DevSpaces link** to open a workspace for the `llm-routing` branch:
+. Click **Open In Catalog**, then click the *Open in DevSpaces* link to open a workspace for the `llm-routing` branch:
 * Show the workspace loading on the correct branch
 
 . Open a new **Terminal** in DevSpaces and pull in the LLM classification code from the prepared branch:
