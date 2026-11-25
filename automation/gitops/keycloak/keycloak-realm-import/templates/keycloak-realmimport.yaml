@@ -676,6 +676,7 @@ spec:
           - profile
           - roles
           - email
+          - kc-admin-api
         optionalClientScopes:
           - web-origins
           - acr
@@ -914,6 +915,13 @@ spec:
           - offline_access
           - microprofile-jwt
     clientScopes:
+      - id: {{ uuidv4 }}
+        name: kc-admin-api
+        description: Keycloak Admin REST API access scope
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: 'true'
+          display.on.consent.screen: 'false'
       - id: {{ uuidv4 }}
         name: web-origins
         description: OpenID Connect scope for add allowed web origins to the access token
